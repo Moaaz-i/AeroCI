@@ -30,6 +30,14 @@
   ],
   "author": "Moaaz",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Moaaz-i/AeroCI.git"
+  },
+  "homepage": "https://github.com/Moaaz-i/AeroCI#readme",
+  "bugs": {
+    "url": "https://github.com/Moaaz-i/AeroCI/issues"
+  },
   "dependencies": {
     "chalk": "^4.1.2",
     "commander": "^12.1.0",
