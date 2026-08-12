@@ -17,3 +17,5 @@ aeroci-summary.md
 # Logs & temp files
 *.log
 .DS_Store
+.env
+.env.*
