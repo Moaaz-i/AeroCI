@@ -1,0 +1,19 @@
+# Node dependencies
+node_modules/
+
+# Build and doc cache outputs
+docs/.vitepress/cache
+docs/.vitepress/dist
+
+# Local execution artifacts & temp sandboxes
+.aeroci-artifacts/
+.aeroci.json
+security-report.md
+aeroci-report.xml
+aeroci-report.html
+aeroci-run.json
+aeroci-summary.md
+
+# Logs & temp files
+*.log
+.DS_Store

@@ -6,6 +6,13 @@
   "bin": {
     "aeroci": "bin/aeroci.js"
   },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
     "start": "node bin/aeroci.js",
     "test": "node tests/runner.test.js",

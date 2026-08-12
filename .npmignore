@@ -1,0 +1,14 @@
+# npm publication ignore
+.git
+.github
+.aeroci-artifacts
+.aeroci.json
+docs/.vitepress/cache
+docs/.vitepress/dist
+security-report.md
+aeroci-report.xml
+aeroci-report.html
+aeroci-run.json
+aeroci-summary.md
+tests
+*.log
