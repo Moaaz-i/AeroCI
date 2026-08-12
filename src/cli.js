@@ -30,10 +30,10 @@ program
 program
     .command('check [workflow]')
     .description('Validates workflow syntax, missing secrets, and path drifts locally')
-    .action((workflowFile = '.github/workflows') => {
+    .action((workflowFile = null) => {
         Logger.banner();
         Logger.info('Scanning workflow files for drifts & syntax errors...');
-        Checker.check(workflowFile);
+        Checker.check(workflowFile || '.github/workflows');
     });
 
 // 3. Simulator Runner Command
@@ -41,7 +41,7 @@ program
     .command('run [workflow]')
     .description('Simulates CI pipeline locally inside an isolated ephemeral runner')
     .option('-d, --debug', 'Enter interactive debug sandbox if a step fails')
-    .action((workflowFile = '.github/workflows/main.yml', options) => {
+    .action((workflowFile = null, options) => {
         Logger.banner();
         Runner.run(workflowFile, { debugOnFailure: options.debug });
     });
