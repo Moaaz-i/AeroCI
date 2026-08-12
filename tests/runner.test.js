@@ -24,7 +24,7 @@ if (fs.existsSync(path.join(process.cwd(), '.aeroci.json'))) {
 
 // Test 2: Checker Engine Test
 Logger.info("\nTest 2: Testing Checker pre-flight engine...");
-const checkResult = Checker.check('.github/workflows/main.yml');
+const checkResult = Checker.check('.github/workflows/deploy-docs.yml');
 if (checkResult.valid) {
     Logger.success("Test 2 Passed: Pre-flight audit engine verified.");
 } else {
@@ -34,7 +34,7 @@ if (checkResult.valid) {
 
 // Test 3: Simulation Runner Test
 Logger.info("\nTest 3: Testing Runner simulation engine...");
-Runner.run('.github/workflows/main.yml');
+Runner.run('.github/workflows/deploy-docs.yml');
 Logger.success("Test 3 Passed: Pipeline simulation completed successfully.");
 
 console.log("\n");

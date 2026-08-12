@@ -37,47 +37,12 @@ class Initializer {
         fs.writeFileSync(configPath, JSON.stringify(configContent, null, 2), 'utf8');
         Logger.success(`Created configuration file: ${colors.cyan}.aeroci.json${colors.reset}`);
 
-        // Create sample workflow if none exists
-        if (!fs.existsSync(workflowDir)) {
-            fs.mkdirSync(workflowDir, { recursive: true });
-        }
-
-        if (!fs.existsSync(sampleWorkflowPath)) {
-            const sampleYaml = `name: CI Digital Twin Workflow
-
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
-
-jobs:
-  build-and-test:
-    name: Build & Test Suite
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js Environment
-        uses: actions/setup-node@v3
-        with:
-          node-version: '20'
-
-      - name: Verify Environment Variables
-        run: |
-          echo "Running inside CI Digital Twin local sandbox..."
-          node -v
-          npm -v
-
-      - name: Run Test Suite
-        run: npm test || echo "Tests executed successfully in simulation"
-`;
-            fs.writeFileSync(sampleWorkflowPath, sampleYaml, 'utf8');
-            Logger.success(`Created sample workflow file: ${colors.cyan}.github/workflows/main.yml${colors.reset}`);
-        } else {
-            Logger.info(`Existing workflow detected at: ${colors.cyan}.github/workflows/main.yml${colors.reset}`);
+        // Check workflows directory
+        if (fs.existsSync(workflowDir)) {
+            const files = fs.readdirSync(workflowDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+            if (files.length > 0) {
+                Logger.info(`Workflows detected in: ${colors.cyan}.github/workflows/${colors.reset}`);
+            }
         }
 
         console.log(colors.gray + '--------------------------------------------------' + colors.reset);
