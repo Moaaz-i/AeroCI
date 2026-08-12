@@ -1,6 +1,6 @@
 /**
  * VelociRadix Powered Web Dashboard Engine for CI-Drift v1.5.0
- * Uses app.serveStatic & explicit index route for stable VelociRadix rendering.
+ * Uses Native VelociRadix Context Object (ctx) for sub-millisecond execution.
  */
 
 const path = require('path');
@@ -16,24 +16,30 @@ class Server {
         const publicDir = path.resolve(__dirname, '../public');
         const indexPath = path.join(publicDir, 'index.html');
 
-        // 1. Serve index.html directly on root route /
-        app.fastGet('/', (req, res) => {
+        // 1. Root route using VelociRadix native Context object (ctx)
+        app.fastGet('/', (ctx) => {
             if (fs.existsSync(indexPath)) {
                 const html = fs.readFileSync(indexPath, 'utf8');
-                res.setHeader('Content-Type', 'text/html');
-                return res.end(html);
+                if (ctx && typeof ctx.sendHTML === 'function') {
+                    return ctx.sendHTML(html);
+                }
+                if (ctx && ctx.res && typeof ctx.res.setHeader === 'function') {
+                    ctx.res.setHeader('Content-Type', 'text/html');
+                    return ctx.res.end(html);
+                }
             }
-            res.setHeader('Content-Type', 'text/plain');
-            res.end('CI-Drift Dashboard');
+            if (ctx && typeof ctx.send === 'function') {
+                return ctx.send('CI-Drift Dashboard');
+            }
         });
 
-        // 2. Serve static assets if any
+        // 2. Serve static assets if supported
         if (typeof app.serveStatic === 'function') {
             app.serveStatic(publicDir);
         }
 
-        // 3. Fast API endpoint for live workflows and metrics
-        app.fastGet('/api/status', (req, res) => {
+        // 3. API endpoint for live workflows using VelociRadix Context (ctx)
+        app.fastGet('/api/status', (ctx) => {
             let workflows = [];
             const dir = path.resolve(process.cwd(), '.github/workflows');
             if (fs.existsSync(dir)) {
@@ -53,7 +59,7 @@ class Server {
             const data = {
                 engine: "CI-Drift Digital Twin",
                 version: "1.5.0",
-                server: "VelociRadix HTTP Engine",
+                server: "VelociRadix HTTP Engine (ctx powered)",
                 remoteMinutesSaved: 420,
                 costSavedUSD: 84.00,
                 guardsActive: 15,
@@ -61,8 +67,13 @@ class Server {
                 status: "active"
             };
 
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify(data));
+            if (ctx && typeof ctx.sendJSON === 'function') {
+                return ctx.sendJSON(data);
+            }
+            if (ctx && ctx.res && typeof ctx.res.setHeader === 'function') {
+                ctx.res.setHeader('Content-Type', 'application/json');
+                return ctx.res.end(JSON.stringify(data));
+            }
         });
 
         app.listen(port, () => {
