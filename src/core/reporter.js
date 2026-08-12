@@ -284,8 +284,10 @@ class Reporter {
     static computeCoverage(allStepsInWorkflow, executedSteps) {
         const total = allStepsInWorkflow;
         const executed = executedSteps;
-        const pct = total === 0 ? 100 : Math.round((executed / total) * 100);
-        const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
+        const pct = total === 0 ? 100 : Math.min(100, Math.max(0, Math.round((executed / total) * 100)));
+        const filled = Math.min(20, Math.max(0, Math.round(pct / 5)));
+        const empty = Math.max(0, 20 - filled);
+        const bar = '█'.repeat(filled) + '░'.repeat(empty);
 
         console.log(`\n${colors.bright}📈 Step Execution Coverage${colors.reset}`);
         Logger.metric('Steps Executed', `${executed}/${total}`);

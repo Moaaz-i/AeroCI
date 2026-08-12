@@ -1,6 +1,6 @@
 {
   "name": "aeroci",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "AeroCI: Local Digital Twin & CI Pipeline Simulator for GitHub Actions",
   "main": "src/cli.js",
   "bin": {

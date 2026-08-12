@@ -20,8 +20,8 @@ const program = new Command();
 
 program
     .name('aeroci')
-    .description('🌪️ AeroCI: Local Digital Twin & Pipeline Simulator for GitHub Actions v2.0.1')
-    .version('2.0.1');
+    .description('🌪️ AeroCI: Local Digital Twin & Pipeline Simulator for GitHub Actions v2.0.2')
+    .version('2.0.2');
 
 // ── 1. Init ──────────────────────────────────────────────────────────────────
 program
