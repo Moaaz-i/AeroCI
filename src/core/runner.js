@@ -2,6 +2,7 @@
  * Local Pipeline Runner Simulation Engine v1.5.0
  * Features:
  * - Full Isolated Workspace Mirroring in Ephemeral Sandbox
+ * - Smart Copy Exclude (excludes node_modules & .git to keep speed blazing fast)
  * - Complete Zero-Impact Execution (cwd set to os.tmpdir sandbox)
  * - Automatic Directory Cleanup on Exit/Error
  */
@@ -51,13 +52,14 @@ class Runner {
         const sandboxDir = fs.mkdtempSync(tempPrefix);
         Logger.info(`Ephemeral Sandbox Workspace mounted at: ${colors.gray}${sandboxDir}${colors.reset}`);
 
-        // 2. Copy workspace manifest & config files to Sandbox so project directory stays untouched
+        // 2. Mirror complete workspace source tree (excluding heavy folders node_modules/.git) to Sandbox
         const projectRoot = process.cwd();
         try {
-            ['package.json', 'package-lock.json', '.vforge', '.vforge.json', '.env'].forEach(item => {
-                const src = path.join(projectRoot, item);
-                if (fs.existsSync(src)) {
-                    fs.cpSync(src, path.join(sandboxDir, item), { recursive: true });
+            fs.cpSync(projectRoot, sandboxDir, {
+                recursive: true,
+                filter: (src) => {
+                    const relative = path.relative(projectRoot, src);
+                    return !relative.startsWith('node_modules') && !relative.startsWith('.git');
                 }
             });
         } catch (e) {}
@@ -155,7 +157,6 @@ class Runner {
                         }
 
                         const startTime = Date.now();
-                        // CRITICAL FIX: Set cwd to sandboxDir so no files are downloaded into projectRoot
                         const result = spawnSync(rawScript, {
                             shell: true,
                             cwd: sandboxDir,
