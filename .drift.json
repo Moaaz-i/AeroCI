@@ -1,0 +1,17 @@
+{
+  "$schema": "https://ci-drift.dev/schema.json",
+  "version": "1.0.0",
+  "runner": {
+    "defaultImage": "ubuntu-latest",
+    "isolation": "ephemeral-node",
+    "timeout": 300
+  },
+  "environment": {
+    "envFile": ".env",
+    "strictSecrets": true
+  },
+  "workflows": [
+    ".github/workflows/*.yml",
+    ".github/workflows/*.yaml"
+  ]
+}

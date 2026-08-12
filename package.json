@@ -1,0 +1,31 @@
+{
+  "name": "ci-drift",
+  "version": "1.0.0",
+  "description": "Local Digital Twin & Pipeline Simulator for GitHub Actions",
+  "main": "src/cli.js",
+  "bin": {
+    "drift": "bin/drift.js",
+    "ci-drift": "bin/drift.js"
+  },
+  "scripts": {
+    "start": "node bin/drift.js",
+    "test": "node tests/runner.test.js"
+  },
+  "keywords": [
+    "ci",
+    "github-actions",
+    "simulator",
+    "digital-twin",
+    "drift-detection",
+    "devops"
+  ],
+  "author": "Moaaz",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^12.1.0",
+    "js-yaml": "^4.1.0",
+    "ora": "^5.4.1",
+    "velociradix": "^6.2.1"
+  }
+}
