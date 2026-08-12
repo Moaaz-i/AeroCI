@@ -1,63 +1,39 @@
-# ✈️ AeroCI Documentation
-
-> **Local Digital Twin & CI Pipeline Simulator for GitHub Actions**
-
 ---
+# https://vitepress.dev/reference/default-theme-home-page
+layout: home
 
-## 📚 Table of Contents
+hero:
+  name: "AeroCI"
+  text: "Sub-Millisecond GitHub Actions Engine Simulator"
+  tagline: Local Digital Twin & CI Pipeline Simulator for GitHub Actions. Eliminate blind commits and debug CI pipelines locally in milliseconds without wasting remote CI quota.
+  actions:
+    - theme: brand
+      text: Get Started
+      link: /getting-started
+    - theme: alt
+      text: CLI Reference
+      link: /cli-reference
+    - theme: alt
+      text: View on GitHub
+      link: https://github.com/Moaaz-i/AeroCI
 
-| Guide | Description |
-|-------|-------------|
-| [Getting Started](./getting-started.md) | Installation, setup, quickstart |
-| [CLI Reference](./cli-reference.md) | All commands & flags |
-| [Configuration](./configuration.md) | `.aeroci.json` schema |
-| [Sandbox & Isolation](./sandbox.md) | How the ephemeral sandbox works |
-| **Features** | |
-| [Workflow Analyzer](./features/analyzer.md) | Deep static analysis (Features 1–10) |
-| [Performance Profiler](./features/profiler.md) | Timing, cost & trends (Features 11–20) |
-| [Security Audit](./features/security.md) | Hardening engine (Features 21–30) |
-| [Reports](./features/reporter.md) | JUnit, HTML, JSON, Markdown (Features 31–40) |
-| [Action Simulator](./features/actions.md) | Rich action library (Features 41–50) |
-| [Contributing](./contributing.md) | How to contribute |
-
+features:
+  - icon: ⚡
+    title: Instant Sandbox Execution
+    details: Powered by macOS APFS clonefile() for O(1) Copy-on-Write sandbox creation in under 10ms.
+  - icon: 🧠
+    title: Deep Workflow Intelligence
+    details: Features 1-10 covering step dependency graphs, dead step detection, circular dependencies, and complexity scoring.
+  - icon: 🛡️
+    title: Security Hardening Engine
+    details: Features 21-30 scanning for supply chain risks, script injection vectors, OIDC scopes, and permission issues.
+  - icon: ⏱️
+    title: Performance Profiler & Cost Savings
+    details: Features 11-20 providing per-step timing breakdowns, trend sparklines, and estimated GitHub Actions billable minutes saved.
+  - icon: 📊
+    title: Multi-Format Reporting
+    details: Features 31-40 outputting JUnit XML, HTML Dashboards, JSON artifacts, Markdown summaries, and GitHub annotations.
+  - icon: 📦
+    title: Action Simulator Library
+    details: Features 41-50 simulating actions/cache, setup-node/python/go/java, github-script, docker build, and AWS credentials locally.
 ---
-
-## What is AeroCI?
-
-AeroCI is a **100% local** CI pipeline simulator. It runs your GitHub Actions workflows
-inside an isolated ephemeral sandbox on your machine — giving you instant feedback
-without burning remote CI minutes or committing broken code.
-
-```
-aeroci run            # simulate the full pipeline locally
-aeroci check          # pre-flight audit before any commit
-aeroci security       # dedicated security hardening scan
-aeroci analyze        # deep workflow intelligence
-aeroci profile        # run history & performance trends
-aeroci report         # generate HTML/JUnit/JSON/Markdown reports
-```
-
----
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                       AeroCI CLI                         │
-│                     bin/aeroci.js                        │
-└──────────┬──────────────────────────────────────────────┘
-           │
-    ┌──────▼──────┐
-    │  src/cli.js  │  Commander.js — routes commands
-    └──────┬──────┘
-           │
-   ┌───────┼──────────────────────────────┐
-   ▼       ▼        ▼        ▼       ▼    ▼
-runner  checker  analyzer security profiler reporter
-   │
-   ▼
-actions (simulator library)
-   │
-   ▼
-APFS clonefile() Isolated Sandbox (~10ms)
-```

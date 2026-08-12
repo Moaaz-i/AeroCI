@@ -1,3 +1,5 @@
+<template v-pre>
+
 # Security Hardening Engine
 
 > **`aeroci security`** — Features 21–30
@@ -145,3 +147,5 @@ When run with `--report`, generates a detailed Markdown audit report at `securit
 - `MEDIUM`
 - `LOW`
 - `INFO`
+
+</template>

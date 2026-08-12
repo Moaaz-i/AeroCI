@@ -99,7 +99,7 @@ just like real GitHub Actions.
 
 ---
 
-## Step Outputs (`steps.<id>.outputs.*`)
+<template v-pre>
 
 ```yaml
 steps:
@@ -111,6 +111,8 @@ steps:
 
 AeroCI reads `$GITHUB_OUTPUT` after each step and makes outputs available
 to all subsequent steps via `${{ steps.<id>.outputs.<key> }}` expressions.
+
+</template>
 
 ---
 

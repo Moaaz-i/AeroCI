@@ -78,7 +78,7 @@ Detects `bash`-specific syntax used in steps that run with `sh` (the default):
 ```yaml
 - run: |
     arr=(a b c)     # ← bash array syntax, fails in sh
-    echo ${arr[0]}
+    echo \${arr[0]}
   shell: sh         # ← incompatible
 ```
 
@@ -92,7 +92,7 @@ Detects `bash`-specific syntax used in steps that run with `sh` (the default):
 
 ## Feature 6 — Secret Flow Map
 
-Traces the path of each `${{ secrets.* }}` reference through:
+Traces the path of each `secrets.*` reference through:
 - Workflow-level `env:` blocks
 - Job-level `env:` blocks
 - Step `env:` blocks
