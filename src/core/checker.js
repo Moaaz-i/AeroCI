@@ -1,11 +1,12 @@
 /**
  * Pre-flight Check Engine
- * Scans GitHub Actions workflow YAML for syntax errors, missing env/secrets, and path drifts.
+ * Scans GitHub Actions workflow YAML for syntax errors, missing env/secrets, path drifts, and npm package typos.
  */
 
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
+const { spawnSync } = require('child_process');
 const { Logger, colors } = require('../utils/logger');
 
 class Checker {
@@ -79,6 +80,26 @@ class Checker {
                             totalWarnings++;
                         }
 
+                        for (const step of steps) {
+                            // Check 3: Npm Package Typo Guard
+                            if (step.run && step.run.includes('npm install')) {
+                                const installMatch = step.run.match(/npm\s+install\s+(?:-[a-z]+\s+)*([a-z0-9_@/.-]+)/i);
+                                if (installMatch && installMatch[1]) {
+                                    const pkgName = installMatch[1].replace(/^-/, '');
+                                    if (pkgName && !pkgName.startsWith('.') && !pkgName.startsWith('/')) {
+                                        Logger.info(`  🔍 Pre-checking npm registry for package: ${colors.yellow}${pkgName}${colors.reset}`);
+                                        const npmCheck = spawnSync('npm', ['view', pkgName, 'version'], { encoding: 'utf8' });
+                                        if (npmCheck.status !== 0) {
+                                            Logger.error(`  ✖ Package Typo Guard: '${pkgName}' does not exist on npm registry!`);
+                                            totalErrors++;
+                                        } else {
+                                            Logger.success(`  ✔ Package '${pkgName}' verified on npm (v${npmCheck.stdout.trim()})`);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Secret / ENV Drift Detection
                         const secretsFound = [];
                         const stepsContent = JSON.stringify(job);
@@ -93,7 +114,6 @@ class Checker {
                         if (secretsFound.length > 0) {
                             Logger.info(`  🔑 Detected Required Secrets: ${secretsFound.map(s => `${colors.yellow}${s}${colors.reset}`).join(', ')}`);
                             
-                            // Check local env file for missing secrets
                             const envFilePath = path.join(process.cwd(), '.env');
                             let localEnvKeys = [];
                             if (fs.existsSync(envFilePath)) {
