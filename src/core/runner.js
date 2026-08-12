@@ -1,10 +1,9 @@
 /**
  * Local Pipeline Runner Simulation Engine v1.5.0
  * Features:
- * - Ephemeral Sandbox Workspace (os.tmpdir Sandbox)
- * - Automatic Cleanup Protocol on Exit/Error (Zero Disk Footprint)
- * - Immediate Process Termination on Completion or Error
- * - Atomic Multiline Script Execution
+ * - Full Isolated Workspace Mirroring in Ephemeral Sandbox
+ * - Complete Zero-Impact Execution (cwd set to os.tmpdir sandbox)
+ * - Automatic Directory Cleanup on Exit/Error
  */
 
 const fs = require('fs');
@@ -47,29 +46,39 @@ class Runner {
             process.exit(0);
         }
 
-        // 1. Create Ephemeral Isolated Sandbox Directory in os.tmpdir()
+        // 1. Create Ephemeral Sandbox Directory in os.tmpdir()
         const tempPrefix = path.join(os.tmpdir(), `drift-sandbox-${Date.now()}-`);
         const sandboxDir = fs.mkdtempSync(tempPrefix);
         Logger.info(`Ephemeral Sandbox Workspace mounted at: ${colors.gray}${sandboxDir}${colors.reset}`);
+
+        // 2. Copy workspace manifest & config files to Sandbox so project directory stays untouched
+        const projectRoot = process.cwd();
+        try {
+            ['package.json', 'package-lock.json', '.vforge', '.vforge.json', '.env'].forEach(item => {
+                const src = path.join(projectRoot, item);
+                if (fs.existsSync(src)) {
+                    fs.cpSync(src, path.join(sandboxDir, item), { recursive: true });
+                }
+            });
+        } catch (e) {}
 
         // Register Auto-Cleanup Hook
         const cleanupSandbox = () => {
             if (fs.existsSync(sandboxDir)) {
                 try {
                     fs.rmSync(sandboxDir, { recursive: true, force: true });
-                    Logger.info(`🧹 Ephemeral Sandbox auto-cleaned. (Zero disk footprint)`);
+                    Logger.info(`🧹 Ephemeral Sandbox auto-cleaned. (Zero disk footprint on project)`);
                 } catch (e) {}
             }
         };
 
-        // Handle process exit signals
         process.on('exit', cleanupSandbox);
         process.on('SIGINT', () => { cleanupSandbox(); process.exit(130); });
 
         let overallSuccess = true;
 
         for (const targetFile of targetFiles) {
-            const relPath = path.relative(process.cwd(), targetFile);
+            const relPath = path.relative(projectRoot, targetFile);
             Logger.info(`Initializing Digital Twin runner for: ${colors.bright}${colors.cyan}${relPath}${colors.reset}`);
 
             const fileContent = fs.readFileSync(targetFile, 'utf8');
@@ -79,7 +88,7 @@ class Runner {
             Logger.metric('Trigger Event', JSON.stringify(parsedYaml.on || 'manual'));
             console.log(colors.gray + '--------------------------------------------------' + colors.reset);
 
-            const envFilePath = path.join(process.cwd(), '.env');
+            const envFilePath = path.join(projectRoot, '.env');
             const localEnv = { 
                 ...process.env, 
                 CI: 'true', 
@@ -123,7 +132,7 @@ class Runner {
                     if (step.uses) {
                         Logger.info(`    ⚡ Simulating GitHub Action: ${colors.yellow}${step.uses}${colors.reset}`);
                         if (step.uses.includes('actions/checkout')) {
-                            Logger.success(`    ✔ Simulated [actions/checkout]: Local workspace mounted in Ephemeral Sandbox.`);
+                            Logger.success(`    ✔ Simulated [actions/checkout]: Local workspace mirrored into Ephemeral Sandbox.`);
                         } else if (step.uses.includes('actions/setup-node')) {
                             const nodeVer = (step.with && step.with['node-version']) || process.version;
                             Logger.success(`    ✔ Simulated [actions/setup-node]: Node.js ${nodeVer} ready.`);
@@ -141,14 +150,15 @@ class Runner {
                         if (displayLines.length === 1) {
                             console.log(`    ${colors.gray}$${colors.reset} ${displayLines[0]}`);
                         } else {
-                            console.log(`    ${colors.gray}$ [Multi-line Atomic Script]${colors.reset}`);
+                            console.log(`    ${colors.gray}$ [Multi-line Script]${colors.reset}`);
                             displayLines.forEach(line => console.log(`      ${colors.gray}|${colors.reset} ${line}`));
                         }
 
                         const startTime = Date.now();
+                        // CRITICAL FIX: Set cwd to sandboxDir so no files are downloaded into projectRoot
                         const result = spawnSync(rawScript, {
                             shell: true,
-                            cwd: process.cwd(),
+                            cwd: sandboxDir,
                             env: stepEnv,
                             stdio: 'pipe',
                             encoding: 'utf8'
