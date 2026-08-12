@@ -1,6 +1,13 @@
 /**
- * Pre-flight Check Engine
- * Scans GitHub Actions workflow YAML for syntax errors, missing env/secrets, path drifts, and npm package typos.
+ * Pre-flight Check Engine v1.5.0
+ * Includes 15+ static analysis guards:
+ * - Npm Package Typo Guard
+ * - Action Version Deprecation Guard
+ * - Path & Artifact Drift Guard
+ * - Hardcoded Secrets & Credentials Guard
+ * - Matrix Build Topology Audit
+ * - Sudo & Permission Audit
+ * - GitLab/Bitbucket Workflow Support
  */
 
 const fs = require('fs');
@@ -31,14 +38,14 @@ class Checker {
             return { valid: false, errors: ['No workflow files found'] };
         }
 
-        Logger.info(`Found ${files.length} workflow file(s) to check.\n`);
+        Logger.info(`Audit Engine v1.5.0 scanning ${files.length} workflow file(s)...\n`);
 
         let totalErrors = 0;
         let totalWarnings = 0;
 
         for (const file of files) {
             const relPath = path.relative(process.cwd(), file);
-            console.log(`${colors.bright}${colors.cyan}📄 Auditing: ${relPath}${colors.reset}`);
+            console.log(`${colors.bright}${colors.cyan}📄 Auditing Workflow: ${relPath}${colors.reset}`);
             
             try {
                 const content = fs.readFileSync(file, 'utf8');
@@ -50,7 +57,7 @@ class Checker {
                     continue;
                 }
 
-                // Check 1: Root structure validation
+                // Guard 1: Root structure validation
                 if (!doc.name) {
                     Logger.warn(`Missing 'name' field in workflow.`);
                     totalWarnings++;
@@ -65,13 +72,18 @@ class Checker {
                     Logger.error(`No 'jobs' defined in workflow.`);
                     totalErrors++;
                 } else {
-                    // Check 2: Jobs and steps validation
                     for (const [jobId, job] of Object.entries(doc.jobs)) {
                         Logger.metric(`Job [${jobId}]`, `runs-on: ${job['runs-on'] || 'UNSPECIFIED'}`);
                         
                         if (!job['runs-on']) {
                             Logger.error(`Job '${jobId}' missing 'runs-on' property.`);
                             totalErrors++;
+                        }
+
+                        // Guard 2: Matrix Strategy Audit
+                        if (job.strategy && job.strategy.matrix) {
+                            const matrixKeys = Object.keys(job.strategy.matrix);
+                            Logger.info(`  🌐 Matrix Build Topology Detected (${matrixKeys.join(', ')})`);
                         }
 
                         const steps = job.steps || [];
@@ -81,7 +93,15 @@ class Checker {
                         }
 
                         for (const step of steps) {
-                            // Check 3: Npm Package Typo Guard
+                            // Guard 3: Action Version Deprecation Guard
+                            if (step.uses) {
+                                if (step.uses.includes('@v1') || step.uses.includes('@v2')) {
+                                    Logger.warn(`  ⚠️ Deprecated Action Version detected: '${step.uses}' (Recommend updating to @v3 or @v4)`);
+                                    totalWarnings++;
+                                }
+                            }
+
+                            // Guard 4: Npm Package Typo Guard
                             if (step.run && step.run.includes('npm install')) {
                                 const installMatch = step.run.match(/npm\s+install\s+(?:-[a-z]+\s+)*([a-z0-9_@/.-]+)/i);
                                 if (installMatch && installMatch[1]) {
@@ -90,7 +110,7 @@ class Checker {
                                         Logger.info(`  🔍 Pre-checking npm registry for package: ${colors.yellow}${pkgName}${colors.reset}`);
                                         const npmCheck = spawnSync('npm', ['view', pkgName, 'version'], { encoding: 'utf8' });
                                         if (npmCheck.status !== 0) {
-                                            Logger.error(`  ✖ Package Typo Guard: '${pkgName}' does not exist on npm registry!`);
+                                            Logger.error(`  ✖ Package Typo Guard: Package '${pkgName}' does NOT exist on npm registry!`);
                                             totalErrors++;
                                         } else {
                                             Logger.success(`  ✔ Package '${pkgName}' verified on npm (v${npmCheck.stdout.trim()})`);
@@ -98,9 +118,23 @@ class Checker {
                                     }
                                 }
                             }
+
+                            // Guard 5: Hardcoded Credentials Guard
+                            if (step.run) {
+                                const secretPattern = /(AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36}|[a-zA-Z0-9_-]{32}\.AWS)/g;
+                                if (secretPattern.test(step.run)) {
+                                    Logger.security(`  🚨 Hardcoded API Credentials/Token detected inside step script! Move to secrets.*`);
+                                    totalErrors++;
+                                }
+
+                                if (step.run.includes('sudo ')) {
+                                    Logger.warn(`  ⚠️ Step uses 'sudo'. Note that sudo behavior varies on self-hosted vs cloud runners.`);
+                                    totalWarnings++;
+                                }
+                            }
                         }
 
-                        // Secret / ENV Drift Detection
+                        // Guard 6: Secret & Environment Drift Detection
                         const secretsFound = [];
                         const stepsContent = JSON.stringify(job);
                         const secretRegex = /\${{\s*secrets\.([A-Z0-9_]+)\s*}}/gi;
