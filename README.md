@@ -1,4 +1,4 @@
-# 🌪️ CI-Drift (`drift`)
+# ✈️ AeroCI (`aeroci`)
 
 > **Local Digital Twin & Pipeline Simulator for GitHub Actions**
 > Eliminate blind commits and debug CI pipelines locally in milliseconds without wasting remote CI quota.
@@ -9,40 +9,40 @@
 
 ### Installation
 
-Install `ci-drift` globally or run locally:
+Install `aeroci` globally or run locally:
 
 ```bash
-npm install -g ci-drift
+npm install -g aeroci
 ```
 
 ### Basic Commands
 
 ```bash
-# Initialize local CI-Drift configuration & sample workflow
-drift init
+# Initialize local AeroCI configuration & sample workflow
+aeroci init
 
 # Run Pre-flight Check (detect YAML syntax errors & missing local .env secrets)
-drift check
+aeroci check
 
 # Simulate pipeline execution locally in an isolated ephemeral environment
-drift run
+aeroci run
 
 # Enter interactive debug sandbox with simulated CI context variables
-drift debug
+aeroci debug
 
 # Launch live web analytics dashboard (Powered by VelociRadix HTTP engine)
-drift ui
+aeroci ui
 ```
 
 ---
 
 ## 🛠️ Feature Architecture
 
-- **`drift init`**: Creates `.drift.json` configuration and auto-generates GitHub Actions sample workflow.
-- **`drift check`**: Pre-flight audit engine that parses workflow YAMLs, inspects required `secrets.*` and alerts if missing in `.env`.
-- **`drift run`**: Executes step-by-step pipeline actions inside ephemeral child processes with full GitHub context (`CI=true`, `GITHUB_ACTIONS=true`).
-- **`drift debug`**: Drops you into an interactive sub-shell configured with exact step environment variables.
-- **`drift ui`**: Embedded high-speed dashboard powered by the **VelociRadix** HTTP engine at `http://localhost:3500`.
+- **`aeroci init`**: Creates `.aeroci.json` configuration and auto-generates GitHub Actions sample workflow.
+- **`aeroci check`**: Pre-flight audit engine that parses workflow YAMLs, inspects required `secrets.*` and alerts if missing in `.env`.
+- **`aeroci run`**: Executes step-by-step pipeline actions inside ephemeral child processes with full GitHub context (`CI=true`, `GITHUB_ACTIONS=true`).
+- **`aeroci debug`**: Drops you into an interactive sub-shell configured with exact step environment variables.
+- **`aeroci ui`**: Embedded high-speed dashboard powered by the **VelociRadix** HTTP engine at `http://localhost:3500`.
 
 ---
 

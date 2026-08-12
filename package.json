@@ -1,14 +1,14 @@
 {
-  "name": "ci-drift",
-  "version": "1.5.0",
-  "description": "Local Digital Twin & Pipeline Simulator for GitHub Actions",
+  "name": "aeroci",
+  "version": "2.0.0",
+  "description": "AeroCI: Local Digital Twin & CI Pipeline Simulator for GitHub Actions",
   "main": "src/cli.js",
   "bin": {
-    "drift": "bin/drift.js",
-    "ci-drift": "bin/drift.js"
+    "aeroci": "bin/aeroci.js",
+    "aeroci": "bin/aeroci.js"
   },
   "scripts": {
-    "start": "node bin/drift.js",
+    "start": "node bin/aeroci.js",
     "test": "node tests/runner.test.js"
   },
   "keywords": [
@@ -16,7 +16,7 @@
     "github-actions",
     "simulator",
     "digital-twin",
-    "drift-detection",
+    "aeroci-detection",
     "devops"
   ],
   "author": "Moaaz",

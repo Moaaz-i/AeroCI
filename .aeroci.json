@@ -1,6 +1,6 @@
 {
-  "$schema": "https://ci-drift.dev/schema.json",
-  "version": "1.0.0",
+  "$schema": "https://aeroci.dev/schema.json",
+  "version": "2.0.0",
   "runner": {
     "defaultImage": "ubuntu-latest",
     "isolation": "ephemeral-node",

@@ -1,5 +1,5 @@
 /**
- * Automated Verification Suite for CI-Drift
+ * Automated Verification Suite for AeroCI
  */
 
 const { Checker } = require('../src/core/checker');
@@ -10,15 +10,15 @@ const fs = require('fs');
 const path = require('path');
 
 Logger.banner();
-Logger.info("Starting CI-Drift Automated Verification Suite...\n");
+Logger.info("Starting AeroCI Automated Verification Suite...\n");
 
 // Test 1: Initialization Test
 Logger.info("Test 1: Testing Initializer engine...");
 Initializer.init();
-if (fs.existsSync(path.join(process.cwd(), '.drift.json'))) {
-    Logger.success("Test 1 Passed: .drift.json configuration generated.");
+if (fs.existsSync(path.join(process.cwd(), '.aeroci.json'))) {
+    Logger.success("Test 1 Passed: .aeroci.json configuration generated.");
 } else {
-    Logger.error("Test 1 Failed: .drift.json missing!");
+    Logger.error("Test 1 Failed: .aeroci.json missing!");
     process.exit(1);
 }
 
@@ -38,4 +38,4 @@ Runner.run('.github/workflows/main.yml');
 Logger.success("Test 3 Passed: Pipeline simulation completed successfully.");
 
 console.log("\n");
-Logger.success("ALL 3 CI-DRIFT INTEGRATION TESTS PASSED PERFECTLY! ✨\n");
+Logger.success("ALL 3 AEROCI INTEGRATION TESTS PASSED PERFECTLY! ✨\n");

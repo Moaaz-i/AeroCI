@@ -1,5 +1,5 @@
 /**
- * VelociRadix Powered Web Dashboard Engine for CI-Drift v1.5.0
+ * VelociRadix Powered Web Dashboard Engine for AeroCI v1.5.0
  * Uses official Velociradix Context (ctx.html / ctx.json) API specifications.
  */
 
@@ -22,7 +22,7 @@ class Server {
                 const htmlContent = fs.readFileSync(indexPath, 'utf8');
                 return ctx.html(htmlContent);
             }
-            return ctx.html('<h1>CI-Drift Dashboard</h1>');
+            return ctx.html('<h1>AeroCI Dashboard</h1>');
         });
 
         // 2. Serve static assets if supported
@@ -49,7 +49,7 @@ class Server {
             }
 
             return ctx.json({
-                engine: "CI-Drift Digital Twin",
+                engine: "AeroCI Digital Twin",
                 version: "1.5.0",
                 server: "Velociradix Native Context (ctx) HTTP Engine",
                 remoteMinutesSaved: 420,

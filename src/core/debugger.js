@@ -18,8 +18,8 @@ class Debugger {
             ...process.env, 
             CI: 'true', 
             GITHUB_ACTIONS: 'true', 
-            DRIFT_DEBUG: '1',
-            PS1: 'ci-drift-sandbox 🌀 \\W $ '
+            AEROCI_DEBUG: '1',
+            PS1: 'aeroci-sandbox 🌀 \\W $ '
         };
 
         if (fs.existsSync(envFilePath)) {

@@ -1,6 +1,6 @@
 /**
  * Initialization Engine
- * Creates configuration file .drift.json and sample GitHub Actions workflow if missing.
+ * Creates configuration file .aeroci.json and sample GitHub Actions workflow if missing.
  */
 
 const fs = require('fs');
@@ -9,15 +9,15 @@ const { Logger, colors } = require('../utils/logger');
 
 class Initializer {
     static init() {
-        Logger.info(`Initializing CI-Drift in local repository...`);
+        Logger.info(`Initializing AeroCI in local repository...`);
 
-        const configPath = path.join(process.cwd(), '.drift.json');
+        const configPath = path.join(process.cwd(), '.aeroci.json');
         const workflowDir = path.join(process.cwd(), '.github/workflows');
         const sampleWorkflowPath = path.join(workflowDir, 'main.yml');
 
-        // Create .drift.json
+        // Create .aeroci.json
         const configContent = {
-            "$schema": "https://ci-drift.dev/schema.json",
+            "$schema": "https://aeroci.dev/schema.json",
             "version": "1.0.0",
             "runner": {
                 "defaultImage": "ubuntu-latest",
@@ -35,7 +35,7 @@ class Initializer {
         };
 
         fs.writeFileSync(configPath, JSON.stringify(configContent, null, 2), 'utf8');
-        Logger.success(`Created configuration file: ${colors.cyan}.drift.json${colors.reset}`);
+        Logger.success(`Created configuration file: ${colors.cyan}.aeroci.json${colors.reset}`);
 
         // Create sample workflow if none exists
         if (!fs.existsSync(workflowDir)) {
@@ -81,10 +81,10 @@ jobs:
         }
 
         console.log(colors.gray + '--------------------------------------------------' + colors.reset);
-        Logger.success(`CI-Drift initialization complete! 🎉`);
+        Logger.success(`AeroCI initialization complete! 🎉`);
         Logger.info(`Next steps:`);
-        Logger.info(`  • Run ${colors.yellow}drift check${colors.reset} to audit your workflows for drift & missing secrets.`);
-        Logger.info(`  • Run ${colors.yellow}drift run${colors.reset} to simulate pipeline execution locally.`);
+        Logger.info(`  • Run ${colors.yellow}aeroci check${colors.reset} to audit your workflows for issues & missing secrets.`);
+        Logger.info(`  • Run ${colors.yellow}aeroci run${colors.reset} to simulate pipeline execution locally.`);
     }
 }
 

@@ -1,9 +1,9 @@
 /**
- * Pre-flight Check Engine v1.5.0
- * Includes 15+ static analysis guards:
+ * AeroCI Pre-flight Check Engine v1.5.0
+ * Includes 15+ static analysis guards :
  * - Npm Package Typo Guard
  * - Action Version Deprecation Guard
- * - Path & Artifact Drift Guard
+ * - Path & Artifact Staleness Guard
  * - Hardcoded Secrets & Credentials Guard
  * - Matrix Build Topology Audit
  * - Sudo & Permission Audit
@@ -34,7 +34,7 @@ class Checker {
 
         if (files.length === 0) {
             Logger.warn(`No workflow YAML files found at: ${targetPath}`);
-            Logger.info(`Tip: Run 'drift init' to generate a sample configuration & workflow.`);
+            Logger.info(`Tip: Run 'aeroci init' to generate a sample configuration & workflow.`);
             return { valid: false, errors: ['No workflow files found'] };
         }
 
@@ -134,7 +134,7 @@ class Checker {
                             }
                         }
 
-                        // Guard 6: Secret & Environment Drift Detection
+                        // Guard 6: Secret & Environment Mismatch Detection
                         const secretsFound = [];
                         const stepsContent = JSON.stringify(job);
                         const secretRegex = /\${{\s*secrets\.([A-Z0-9_]+)\s*}}/gi;
