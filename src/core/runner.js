@@ -1,15 +1,15 @@
 /**
  * Local Pipeline Runner Simulation Engine v1.5.0
  * Features:
+ * - Ephemeral Sandbox Workspace (os.tmpdir Sandbox)
+ * - Automatic Cleanup Protocol on Exit/Error (Zero Disk Footprint)
  * - Immediate Process Termination on Completion or Error
  * - Atomic Multiline Script Execution
- * - VelociForge Sub-Millisecond Cache Acceleration Integration
- * - Local Artifact Store Simulation (.drift-artifacts/)
- * - Step Performance & Execution Profiling
  */
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
 const { Logger, colors } = require('../utils/logger');
@@ -47,10 +47,24 @@ class Runner {
             process.exit(0);
         }
 
-        const artifactDir = path.join(process.cwd(), '.drift-artifacts');
-        if (!fs.existsSync(artifactDir)) {
-            fs.mkdirSync(artifactDir, { recursive: true });
-        }
+        // 1. Create Ephemeral Isolated Sandbox Directory in os.tmpdir()
+        const tempPrefix = path.join(os.tmpdir(), `drift-sandbox-${Date.now()}-`);
+        const sandboxDir = fs.mkdtempSync(tempPrefix);
+        Logger.info(`Ephemeral Sandbox Workspace mounted at: ${colors.gray}${sandboxDir}${colors.reset}`);
+
+        // Register Auto-Cleanup Hook
+        const cleanupSandbox = () => {
+            if (fs.existsSync(sandboxDir)) {
+                try {
+                    fs.rmSync(sandboxDir, { recursive: true, force: true });
+                    Logger.info(`🧹 Ephemeral Sandbox auto-cleaned. (Zero disk footprint)`);
+                } catch (e) {}
+            }
+        };
+
+        // Handle process exit signals
+        process.on('exit', cleanupSandbox);
+        process.on('SIGINT', () => { cleanupSandbox(); process.exit(130); });
 
         let overallSuccess = true;
 
@@ -71,7 +85,8 @@ class Runner {
                 CI: 'true', 
                 GITHUB_ACTIONS: 'true', 
                 DRIFT_SIMULATOR: '1.5.0',
-                DRIFT_ARTIFACT_PATH: artifactDir
+                DRIFT_SANDBOX: sandboxDir,
+                TMPDIR: sandboxDir
             };
 
             if (fs.existsSync(envFilePath)) {
@@ -108,7 +123,7 @@ class Runner {
                     if (step.uses) {
                         Logger.info(`    ⚡ Simulating GitHub Action: ${colors.yellow}${step.uses}${colors.reset}`);
                         if (step.uses.includes('actions/checkout')) {
-                            Logger.success(`    ✔ Simulated [actions/checkout]: Local workspace already mounted.`);
+                            Logger.success(`    ✔ Simulated [actions/checkout]: Local workspace mounted in Ephemeral Sandbox.`);
                         } else if (step.uses.includes('actions/setup-node')) {
                             const nodeVer = (step.with && step.with['node-version']) || process.version;
                             Logger.success(`    ✔ Simulated [actions/setup-node]: Node.js ${nodeVer} ready.`);
@@ -126,7 +141,7 @@ class Runner {
                         if (displayLines.length === 1) {
                             console.log(`    ${colors.gray}$${colors.reset} ${displayLines[0]}`);
                         } else {
-                            console.log(`    ${colors.gray}$ [Multi-line Script]${colors.reset}`);
+                            console.log(`    ${colors.gray}$ [Multi-line Atomic Script]${colors.reset}`);
                             displayLines.forEach(line => console.log(`      ${colors.gray}|${colors.reset} ${line}`));
                         }
 
@@ -170,11 +185,12 @@ class Runner {
                 Logger.success(`Workflow [${relPath}] simulated successfully! ✨`);
             } else {
                 Logger.error(`Workflow [${relPath}] stopped with ${failedSteps} failed step(s).`);
+                cleanupSandbox();
                 process.exit(1);
             }
         }
 
-        // Clean exit code 0 when all workflows complete successfully
+        cleanupSandbox();
         if (overallSuccess) {
             process.exit(0);
         }
