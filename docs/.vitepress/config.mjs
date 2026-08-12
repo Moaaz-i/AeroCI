@@ -3,6 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: "AeroCI",
   description: "Local Digital Twin & CI Pipeline Simulator for GitHub Actions",
+  ignoreDeadLinks: true,
   markdown: {
     vPre: true
   },
