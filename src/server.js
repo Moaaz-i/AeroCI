@@ -17,7 +17,7 @@ class Server {
     static start(port = 3500) {
         const app = createApp();
 
-        // Dashboard HTML UI Route
+        // Dashboard HTML UI Route (VelociRadix Native Response API)
         app.get('/', (req, res) => {
             let workflows = [];
             const dir = path.resolve(process.cwd(), '.github/workflows');
@@ -209,8 +209,17 @@ class Server {
     </table>
 </body>
 </html>`;
-            res.setHeader('Content-Type', 'text/html');
-            res.end(html);
+
+            if (req && typeof req.sendHTML === 'function') {
+                return req.sendHTML(html);
+            }
+            if (res && typeof res.setHeader === 'function') {
+                res.setHeader('Content-Type', 'text/html');
+                return res.end(html);
+            }
+            if (req && typeof req.end === 'function') {
+                return req.end(html);
+            }
         });
 
         // API Endpoint for JSON stats
@@ -224,8 +233,17 @@ class Server {
                 guardsActive: 15,
                 status: "active"
             };
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify(data));
+
+            if (req && typeof req.sendJSON === 'function') {
+                return req.sendJSON(data);
+            }
+            if (res && typeof res.setHeader === 'function') {
+                res.setHeader('Content-Type', 'application/json');
+                return res.end(JSON.stringify(data));
+            }
+            if (req && typeof req.end === 'function') {
+                return req.end(JSON.stringify(data));
+            }
         });
 
         app.listen(port, () => {
