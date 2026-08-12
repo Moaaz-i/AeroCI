@@ -60,8 +60,8 @@ program
     .command('ui')
     .description('Launches the interactive local web dashboard (VelociRadix Engine) on port 3500')
     .option('-p, --port <number>', 'Port to listen on', 3500)
-    .action((options) => {
-        Server.start(parseInt(options.port));
+    .action(async (options) => {
+        await Server.start(parseInt(options.port));
     });
 
 program.parse(process.argv);

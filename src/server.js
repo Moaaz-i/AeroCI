@@ -1,24 +1,20 @@
 /**
  * VelociRadix Powered Web Dashboard Engine for CI-Drift v1.5.0
- * Provides a real-time analytics dashboard at http://localhost:3500 showing:
- * - Workflow visual graphs & status
- * - Remote CI minutes & cost savings calculator
- * - Step timing profile & live metrics
- * - Environment drift matrix
+ * Provides a real-time analytics dashboard at http://localhost:3500
  */
 
-const { createApp } = require('velociradix');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
 const yaml = require('js-yaml');
 const { Logger } = require('./utils/logger');
 
 class Server {
-    static start(port = 3500) {
+    static async start(port = 3500) {
+        const { createApp } = await import('velociradix');
         const app = createApp();
 
-        // Dashboard HTML UI Route (VelociRadix Native Response API)
-        app.get('/', (req, res) => {
+        // 1. HTML Route using fastGet
+        app.fastGet('/', (req, res) => {
             let workflows = [];
             const dir = path.resolve(process.cwd(), '.github/workflows');
             if (fs.existsSync(dir)) {
@@ -44,7 +40,7 @@ class Server {
     <style>
         :root {
             --bg: #0b0f19;
-            --card-bg: rgba(22, 27, 34, 0.8);
+            --card-bg: rgba(22, 27, 34, 0.85);
             --border: #30363d;
             --text: #c9d1d9;
             --cyan: #58a6ff;
@@ -93,7 +89,6 @@ class Server {
         }
         .card {
             background: var(--card-bg);
-            backdrop-filter: blur(10px);
             border: 1px solid var(--border);
             border-radius: 16px;
             padding: 24px;
@@ -210,20 +205,12 @@ class Server {
 </body>
 </html>`;
 
-            if (req && typeof req.sendHTML === 'function') {
-                return req.sendHTML(html);
-            }
-            if (res && typeof res.setHeader === 'function') {
-                res.setHeader('Content-Type', 'text/html');
-                return res.end(html);
-            }
-            if (req && typeof req.end === 'function') {
-                return req.end(html);
-            }
+            res.setHeader('Content-Type', 'text/html');
+            res.end(html);
         });
 
-        // API Endpoint for JSON stats
-        app.get('/api/status', (req, res) => {
+        // 2. API Route using fastGet
+        app.fastGet('/api/status', (req, res) => {
             const data = {
                 engine: "CI-Drift Digital Twin",
                 version: "1.5.0",
@@ -233,17 +220,8 @@ class Server {
                 guardsActive: 15,
                 status: "active"
             };
-
-            if (req && typeof req.sendJSON === 'function') {
-                return req.sendJSON(data);
-            }
-            if (res && typeof res.setHeader === 'function') {
-                res.setHeader('Content-Type', 'application/json');
-                return res.end(JSON.stringify(data));
-            }
-            if (req && typeof req.end === 'function') {
-                return req.end(JSON.stringify(data));
-            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(data));
         });
 
         app.listen(port, () => {
