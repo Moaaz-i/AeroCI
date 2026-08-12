@@ -1,6 +1,6 @@
 /**
  * VelociRadix Powered Web Dashboard Engine for CI-Drift v1.5.0
- * Uses app.serveStatic for stable, high-speed static asset rendering.
+ * Uses app.serveStatic & explicit index route for stable VelociRadix rendering.
  */
 
 const path = require('path');
@@ -13,10 +13,26 @@ class Server {
         const { createApp } = await import('velociradix');
         const app = createApp();
 
-        // 1. Serve static HTML frontend via VelociRadix native static server
-        app.serveStatic(path.join(__dirname, '../public'));
+        const publicDir = path.resolve(__dirname, '../public');
+        const indexPath = path.join(publicDir, 'index.html');
 
-        // 2. Fast API endpoint for live workflows and metrics
+        // 1. Serve index.html directly on root route /
+        app.fastGet('/', (req, res) => {
+            if (fs.existsSync(indexPath)) {
+                const html = fs.readFileSync(indexPath, 'utf8');
+                res.setHeader('Content-Type', 'text/html');
+                return res.end(html);
+            }
+            res.setHeader('Content-Type', 'text/plain');
+            res.end('CI-Drift Dashboard');
+        });
+
+        // 2. Serve static assets if any
+        if (typeof app.serveStatic === 'function') {
+            app.serveStatic(publicDir);
+        }
+
+        // 3. Fast API endpoint for live workflows and metrics
         app.fastGet('/api/status', (req, res) => {
             let workflows = [];
             const dir = path.resolve(process.cwd(), '.github/workflows');
