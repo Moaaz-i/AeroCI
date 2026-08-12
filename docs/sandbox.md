@@ -79,7 +79,7 @@ Plus everything from your `.env` file.
 
 ---
 
-## `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `$GITHUB_PATH`
+## GITHUB_OUTPUT, GITHUB_ENV, GITHUB_PATH
 
 AeroCI fully implements the GitHub Actions output mechanisms:
 
@@ -99,20 +99,18 @@ just like real GitHub Actions.
 
 ---
 
-<template v-pre>
+## Step Outputs (`steps.<id>.outputs.*`)
 
 ```yaml
 steps:
   - id: get-version
     run: echo "version=1.2.3" >> $GITHUB_OUTPUT
 
-  - run: echo "Version is ${{ steps.get-version.outputs.version }}"
+  - run: echo "Version is \${{ steps.get-version.outputs.version }}"
 ```
 
 AeroCI reads `$GITHUB_OUTPUT` after each step and makes outputs available
-to all subsequent steps via `${{ steps.<id>.outputs.<key> }}` expressions.
-
-</template>
+to all subsequent steps via `steps.<id>.outputs.<key>` expressions.
 
 ---
 

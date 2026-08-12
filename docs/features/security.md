@@ -1,5 +1,3 @@
-<template v-pre>
-
 # Security Hardening Engine
 
 > **`aeroci security`** — Features 21–30
@@ -56,16 +54,16 @@ permissions:
 
 ## Feature 23 — Environment Injection Guard (`SEC-023`)
 
-Scans for `${{ env.VAR }}` expressions interpolated directly inside `run:` shell blocks.
+Scans for `env.VAR` expressions interpolated directly inside `run:` shell blocks.
 
 ```yaml
 # ❌ Vulnerable to shell injection if env comes from untrusted sources
-- run: echo "Hello ${{ env.USER_NAME }}"
+- run: echo "Hello ${{ 'env.USER_NAME' }}"
 
 # ✅ Secure: Pass as process environment variable
 - run: echo "Hello $USER_NAME"
   env:
-    USER_NAME: ${{ env.USER_NAME }}
+    USER_NAME: ${{ 'env.USER_NAME' }}
 ```
 
 ---
@@ -75,23 +73,23 @@ Scans for `${{ env.VAR }}` expressions interpolated directly inside `run:` shell
 Detects direct interpolation of user-controlled GitHub context values into `run:` scripts.
 
 **Monitored untrusted inputs:**
-- `${{ github.event.issue.title }}`
-- `${{ github.event.issue.body }}`
-- `${{ github.event.pull_request.title }}`
-- `${{ github.event.pull_request.body }}`
-- `${{ github.event.comment.body }}`
-- `${{ github.event.head_commit.message }}`
-- `${{ github.actor }}`
-- `${{ github.head_ref }}`
+- `github.event.issue.title`
+- `github.event.issue.body`
+- `github.event.pull_request.title`
+- `github.event.pull_request.body`
+- `github.event.comment.body`
+- `github.event.head_commit.message`
+- `github.actor`
+- `github.head_ref`
 
 ```yaml
 # ❌ CRITICAL: Shell Injection vulnerability
-- run: echo "Title: ${{ github.event.issue.title }}"
+- run: echo "Title: ${{ 'github.event.issue.title' }}"
 
 # ✅ Secure
 - run: echo "Title: $TITLE"
   env:
-    TITLE: ${{ github.event.issue.title }}
+    TITLE: ${{ 'github.event.issue.title' }}
 ```
 
 ---
@@ -114,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ 'github.event.pull_request.head.sha' }}
 ```
 
 ---
@@ -147,5 +145,3 @@ When run with `--report`, generates a detailed Markdown audit report at `securit
 - `MEDIUM`
 - `LOW`
 - `INFO`
-
-</template>
