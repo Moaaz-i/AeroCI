@@ -102,51 +102,49 @@ class Runner {
 
                     if (step.run) {
                         const stepEnv = { ...jobEnv, ...(step.env || {}) };
-                        const commands = step.run.split('\n').map(c => c.trim()).filter(Boolean);
+                        const rawScript = step.run.trim();
 
-                        let stepFailed = false;
-                        for (const cmd of commands) {
-                            console.log(`    ${colors.gray}$${colors.reset} ${cmd}`);
-                            const startTime = Date.now();
-                            
-                            const result = spawnSync(cmd, {
-                                shell: true,
-                                cwd: process.cwd(),
-                                env: stepEnv,
-                                stdio: 'pipe',
-                                encoding: 'utf8'
-                            });
-
-                            const duration = Date.now() - startTime;
-
-                            if (result.stdout && result.stdout.trim()) {
-                                result.stdout.trim().split('\n').forEach(l => console.log(`      ${colors.gray}|${colors.reset} ${l}`));
-                            }
-
-                            if (result.status !== 0) {
-                                if (result.stderr && result.stderr.trim()) {
-                                    result.stderr.trim().split('\n').forEach(l => console.log(`      ${colors.red}|${colors.reset} ${l}`));
-                                }
-                                Logger.error(`Command failed with exit code ${result.status} (${duration}ms)`);
-                                failedSteps++;
-                                stepFailed = true;
-
-                                if (options.debugOnFailure) {
-                                    Logger.warn(`Entering debug mode for step...`);
-                                }
-                                
-                                if (!step['continue-on-error']) {
-                                    Logger.error(`Job [${jobId}] aborted immediately due to step failure.`);
-                                    jobAborted = true;
-                                    break;
-                                }
-                            } else {
-                                Logger.success(`    ✔ Completed in ${duration}ms`);
-                            }
+                        const displayLines = rawScript.split('\n');
+                        if (displayLines.length === 1) {
+                            console.log(`    ${colors.gray}$${colors.reset} ${displayLines[0]}`);
+                        } else {
+                            console.log(`    ${colors.gray}$ [Multi-line Script]${colors.reset}`);
+                            displayLines.forEach(line => console.log(`      ${colors.gray}|${colors.reset} ${line}`));
                         }
 
-                        if (stepFailed && !step['continue-on-error']) {
-                            break;
+                        const startTime = Date.now();
+                        const result = spawnSync(rawScript, {
+                            shell: true,
+                            cwd: process.cwd(),
+                            env: stepEnv,
+                            stdio: 'pipe',
+                            encoding: 'utf8'
+                        });
+
+                        const duration = Date.now() - startTime;
+
+                        if (result.stdout && result.stdout.trim()) {
+                            result.stdout.trim().split('\n').forEach(l => console.log(`      ${colors.cyan}|${colors.reset} ${l}`));
+                        }
+
+                        if (result.status !== 0) {
+                            if (result.stderr && result.stderr.trim()) {
+                                result.stderr.trim().split('\n').forEach(l => console.log(`      ${colors.red}|${colors.reset} ${l}`));
+                            }
+                            Logger.error(`Command failed with exit code ${result.status} (${duration}ms)`);
+                            failedSteps++;
+
+                            if (options.debugOnFailure) {
+                                Logger.warn(`Entering debug mode for step...`);
+                            }
+                            
+                            if (!step['continue-on-error']) {
+                                Logger.error(`Job [${jobId}] aborted immediately due to step failure.`);
+                                jobAborted = true;
+                                break;
+                            }
+                        } else {
+                            Logger.success(`    ✔ Completed in ${duration}ms`);
                         }
                     }
                 }
