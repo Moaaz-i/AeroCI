@@ -71,10 +71,12 @@ class Runner {
             }
 
             const jobs = parsedYaml.jobs || {};
-            let totalStepsExecuted = 0;
             let failedSteps = 0;
+            let jobAborted = false;
 
             for (const [jobId, jobDetails] of Object.entries(jobs)) {
+                if (jobAborted) break;
+
                 console.log(`\n${colors.magenta}${colors.bright}▶ Executing Job: [${jobId}]${colors.reset} ${colors.gray}(runs-on: ${jobDetails['runs-on'] || 'ubuntu-latest'})${colors.reset}`);
                 
                 const jobEnv = { ...localEnv, ...(jobDetails.env || {}) };
@@ -95,7 +97,6 @@ class Runner {
                         } else {
                             Logger.success(`    ✔ Simulated GitHub Action [${step.uses}] completed.`);
                         }
-                        totalStepsExecuted++;
                         continue;
                     }
 
@@ -103,6 +104,7 @@ class Runner {
                         const stepEnv = { ...jobEnv, ...(step.env || {}) };
                         const commands = step.run.split('\n').map(c => c.trim()).filter(Boolean);
 
+                        let stepFailed = false;
                         for (const cmd of commands) {
                             console.log(`    ${colors.gray}$${colors.reset} ${cmd}`);
                             const startTime = Date.now();
@@ -127,19 +129,24 @@ class Runner {
                                 }
                                 Logger.error(`Command failed with exit code ${result.status} (${duration}ms)`);
                                 failedSteps++;
-                                
+                                stepFailed = true;
+
                                 if (options.debugOnFailure) {
                                     Logger.warn(`Entering debug mode for step...`);
                                 }
                                 
                                 if (!step['continue-on-error']) {
-                                    Logger.error(`Job [${jobId}] aborted due to step failure.`);
+                                    Logger.error(`Job [${jobId}] aborted immediately due to step failure.`);
+                                    jobAborted = true;
                                     break;
                                 }
                             } else {
                                 Logger.success(`    ✔ Completed in ${duration}ms`);
-                                totalStepsExecuted++;
                             }
+                        }
+
+                        if (stepFailed && !step['continue-on-error']) {
+                            break;
                         }
                     }
                 }
@@ -149,7 +156,8 @@ class Runner {
             if (failedSteps === 0) {
                 Logger.success(`Workflow [${relPath}] simulated successfully! ✨`);
             } else {
-                Logger.error(`Workflow [${relPath}] finished with ${failedSteps} failed step(s).`);
+                Logger.error(`Workflow [${relPath}] stopped with ${failedSteps} failed step(s).`);
+                process.exit(1);
             }
         }
     }
