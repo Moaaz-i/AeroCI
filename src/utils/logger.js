@@ -1,5 +1,5 @@
 /**
- * AeroCI Advanced Terminal Logger & Visual Utilities v2.0.0
+ * AeroCI Advanced Terminal Logger & Visual Utilities v2.0.1
  */
 
 const colors = {
@@ -25,7 +25,7 @@ ${colors.cyan}${colors.bright}    _                 ____ ___
   / _ \ / _ \ '__/ _ \___ \| | 
  / ___ \  __/ | | (_) |__) | | 
 /_/   \_\___|_|  \___/____/___| ${colors.reset}
-${colors.gray} Local Digital Twin & CI Pipeline Simulator v2.0.0 (100+ Enterprise Features)${colors.reset}
+${colors.gray} Local Digital Twin & CI Pipeline Simulator v2.0.1 (100+ Enterprise Features)${colors.reset}
         `);
     }
 
