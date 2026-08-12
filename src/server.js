@@ -1,6 +1,6 @@
 /**
  * VelociRadix Powered Web Dashboard Engine for CI-Drift v1.5.0
- * Uses Native VelociRadix Context Object (ctx) for sub-millisecond execution.
+ * Uses official Velociradix Context (ctx.html / ctx.json) API specifications.
  */
 
 const path = require('path');
@@ -16,30 +16,22 @@ class Server {
         const publicDir = path.resolve(__dirname, '../public');
         const indexPath = path.join(publicDir, 'index.html');
 
-        // 1. Root route using VelociRadix native Context object (ctx)
-        app.fastGet('/', (ctx) => {
+        // 1. Root route using official Velociradix Context (ctx.html) API
+        app.get('/', (ctx) => {
             if (fs.existsSync(indexPath)) {
-                const html = fs.readFileSync(indexPath, 'utf8');
-                if (ctx && typeof ctx.sendHTML === 'function') {
-                    return ctx.sendHTML(html);
-                }
-                if (ctx && ctx.res && typeof ctx.res.setHeader === 'function') {
-                    ctx.res.setHeader('Content-Type', 'text/html');
-                    return ctx.res.end(html);
-                }
+                const htmlContent = fs.readFileSync(indexPath, 'utf8');
+                return ctx.html(htmlContent);
             }
-            if (ctx && typeof ctx.send === 'function') {
-                return ctx.send('CI-Drift Dashboard');
-            }
+            return ctx.html('<h1>CI-Drift Dashboard</h1>');
         });
 
         // 2. Serve static assets if supported
         if (typeof app.serveStatic === 'function') {
-            app.serveStatic(publicDir);
+            app.serveStatic('/', publicDir);
         }
 
-        // 3. API endpoint for live workflows using VelociRadix Context (ctx)
-        app.fastGet('/api/status', (ctx) => {
+        // 3. API status endpoint using official Velociradix Context (ctx.json) API
+        app.get('/api/status', (ctx) => {
             let workflows = [];
             const dir = path.resolve(process.cwd(), '.github/workflows');
             if (fs.existsSync(dir)) {
@@ -56,29 +48,21 @@ class Server {
                 });
             }
 
-            const data = {
+            return ctx.json({
                 engine: "CI-Drift Digital Twin",
                 version: "1.5.0",
-                server: "VelociRadix HTTP Engine (ctx powered)",
+                server: "Velociradix Native Context (ctx) HTTP Engine",
                 remoteMinutesSaved: 420,
                 costSavedUSD: 84.00,
                 guardsActive: 15,
                 workflows: workflows,
                 status: "active"
-            };
-
-            if (ctx && typeof ctx.sendJSON === 'function') {
-                return ctx.sendJSON(data);
-            }
-            if (ctx && ctx.res && typeof ctx.res.setHeader === 'function') {
-                ctx.res.setHeader('Content-Type', 'application/json');
-                return ctx.res.end(JSON.stringify(data));
-            }
+            });
         });
 
         app.listen(port, () => {
             Logger.banner();
-            Logger.success(`VelociRadix-powered Dashboard v1.5.0 live at: http://localhost:${port}`);
+            Logger.success(`Velociradix-powered Dashboard v1.5.0 live at: http://localhost:${port}`);
         });
     }
 }
