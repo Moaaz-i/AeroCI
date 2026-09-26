@@ -1,8 +1,20 @@
 #!/usr/bin/env node
 
-const { Command } = require('commander');
+/**
+ * AeroCI command line.
+ *
+ * Every command is a thin wrapper: it parses arguments, calls the module that
+ * does the work, and turns the result into an exit code. No business logic
+ * lives here.
+ *
+ * The process exit code is set through `process.exitCode`, never
+ * `process.exit()`, so buffered stdout is always flushed before the process
+ * ends — a truncated report is worse than a slow one.
+ */
+
 const path = require('path');
 const fs = require('fs');
+const { Command, Option } = require('commander');
 
 const { Logger, colors } = require('./utils/logger');
 const { Checker } = require('./core/checker');
@@ -13,189 +25,388 @@ const { Analyzer } = require('./core/analyzer');
 const { Profiler } = require('./core/profiler');
 const { Security } = require('./core/security');
 const { Reporter } = require('./core/reporter');
-const { Actions } = require('./core/actions');
+const { Versions } = require('./core/versions');
 const { Server } = require('./server');
+const { VERSION } = require('./version');
+
+const DEFAULT_TARGET = '.github/workflows';
+
+/** Only the non-zero defect counts, so the message is not a row of zeroes. */
+function describeDefects(defects) {
+    const labels = {
+        deadSteps: 'dead step',
+        duplicateSteps: 'duplicate step',
+        unusedOutputs: 'unused output',
+        shellIssues: 'shell issue',
+        redundantJobs: 'redundant job'
+    };
+    return Object.entries(defects)
+        .filter(([, count]) => count > 0)
+        .map(([key, count]) => `${count} ${labels[key]}${count === 1 ? '' : 's'}`)
+        .join(', ');
+}
+
+/**
+ * `--env A=1 --env B=2`
+ *
+ * A variadic option (`--env <k=v...>`) also swallows the positional workflow
+ * path when the option comes first, so `aeroci run --env A=1 ci.yml` silently
+ * treats `ci.yml` as an environment entry. Collecting one value per flag
+ * removes the ambiguity.
+ */
+function collectEnv(value, previous) {
+    const separator = value.indexOf('=');
+    if (separator < 1) {
+        Logger.warn(`Ignoring --env "${value}": expected KEY=value`);
+        return previous;
+    }
+    return { ...previous, [value.slice(0, separator)]: value.slice(separator + 1) };
+}
 
 const program = new Command();
 
 program
     .name('aeroci')
-    .description('🌪️ AeroCI: Local Digital Twin & Pipeline Simulator for GitHub Actions v2.0.2')
-    .version('2.0.2');
+    .description('AeroCI — run and audit your GitHub Actions workflows locally')
+    .version(VERSION, '-V, --version', `output the version number (${VERSION})`)
+    .showHelpAfterError('(run `aeroci --help` for usage)')
+    .configureOutput({
+        outputError: (str, write) => write(colors.red(str))
+    });
 
-// ── 1. Init ──────────────────────────────────────────────────────────────────
+// ── init ──────────────────────────────────────────────────────────────────────
+
 program
     .command('init')
-    .description('Initialize AeroCI config (.aeroci.json) and sample workflow')
-    .action(() => {
-        Initializer.init();
+    .description('create .aeroci.json, a sample workflow and a .gitignore entry')
+    .option('-f, --force', 'overwrite files that already exist')
+    .option('--no-sample', 'do not write a sample workflow')
+    .option('--no-env', 'do not write .env.example')
+    .action((options) => {
+        Logger.banner();
+        Initializer.init({ force: !!options.force, sample: options.sample, env: options.env });
     });
 
-// ── 2. Check ─────────────────────────────────────────────────────────────────
+// ── check ────────────────────────────────────────────────────────────────────
+
 program
-    .command('check [workflow]')
-    .description('Validate workflow syntax, missing secrets, and pipeline issues')
-    .option('--security', 'Also run the security hardening audit')
-    .option('--analyze',  'Also run the deep workflow analyzer')
-    .action((workflowFile = null, options) => {
+    .command('check')
+    .description('validate workflows: schema, actions, secrets, graph, matrix, shell')
+    .argument('[target]', 'file, directory or project root', DEFAULT_TARGET)
+    .option('--security', 'also run the security audit')
+    .option('--analyze', 'also run the workflow analyzer')
+    .option('--network', 'also ask the npm registry whether each installed package exists (needs the network)')
+    .action((target, options) => {
         Logger.banner();
-        Logger.info('Scanning workflow files for issues & syntax errors...');
-        Checker.check(workflowFile || '.github/workflows');
+        // Off unless asked: the check shells out to `npm view` per package, and
+        // a checker that reaches the network without being told to is a trap.
+        const report = Checker.check(target, { network: !!options.network });
         if (options.security) {
-            console.log();
-            Security.audit(workflowFile || '.github/workflows');
+            console.log('');
+            Security.audit(target);
         }
         if (options.analyze) {
-            console.log();
-            Analyzer.analyze(workflowFile || '.github/workflows');
+            console.log('');
+            Analyzer.analyze(target);
         }
+        // Errors fail the command; warnings are advisory and do not.
+        process.exitCode = report.errors > 0 ? 1 : 0;
     });
 
-// ── 3. Run ───────────────────────────────────────────────────────────────────
+// ── run ──────────────────────────────────────────────────────────────────────
+
 program
-    .command('run [workflow]')
-    .description('Simulate CI pipeline locally inside an isolated ephemeral sandbox')
-    .option('-d, --debug',           'Enter interactive debug sandbox if a step fails')
-    .option('--only-job <id>',       'Run only a specific job by its ID')
-    .option('--report',              'Generate JUnit XML, HTML, Markdown & JSON reports after run')
-    .option('--timeout <minutes>',   'Per-step timeout in minutes (default: 10)', parseInt)
-    .option('--env <key=value...>',  'Inject environment variables into the run (repeatable)')
-    .action((workflowFile = null, options) => {
+    .command('run')
+    .description('run workflows in an isolated sandbox')
+    .argument('[target]', 'file, directory, glob or project root', DEFAULT_TARGET)
+    .option('-d, --debug', 'drop into a matching shell if a step fails')
+    .option('--only-job <id>', 'run only this job id')
+    .option('--event <name>', 'event to simulate', 'push')
+    .option('--timeout <minutes>', 'per-step timeout in minutes', (v) => Number(v))
+    .option('--env <KEY=VALUE>', 'set an environment variable (repeatable)', collectEnv, {})
+    .option('--var <KEY=VALUE>', 'set a repository variable (repeatable)', collectEnv, {})
+    .option('--keep', 'keep the sandbox on disk after the run')
+    .option('--dry-run', 'resolve and print what would run, without running it')
+    .option('--report', 'write json, markdown, html and junit reports under .aeroci-artifacts/report/')
+    .option('--report-dir <dir>', 'where those reports go', '.aeroci-artifacts/report')
+    .option('--format <list>', 'comma-separated: json,markdown,html,junit', 'json,markdown,html,junit')
+    .option('--json [path]', 'write the run summary as JSON (default: alongside the reports)')
+    .option('--no-annotations', 'do not emit ::error / ::warning workflow commands')
+    .option('--profile', 'show the timing table and the cost projection')
+    .action(async (target, options) => {
         Logger.banner();
-
-        // Parse --env KEY=VAL entries
-        const envOverrides = {};
-        if (options.env) {
-            const envList = Array.isArray(options.env) ? options.env : [options.env];
-            for (const entry of envList) {
-                const idx = entry.indexOf('=');
-                if (idx > 0) {
-                    envOverrides[entry.slice(0, idx)] = entry.slice(idx + 1);
-                }
-            }
-        }
-
-        Runner.run(workflowFile, {
-            debugOnFailure: options.debug,
+        const exitCode = await Runner.run(target, {
+            cwd: process.cwd(),
+            event: options.event,
+            debugOnFailure: !!options.debug,
             onlyJob: options.onlyJob || null,
             report: !!options.report,
-            stepTimeout: options.timeout || 10,
-            envOverrides
+            reportDir: options.reportDir,
+            reportFormats: String(options.format).split(',').map((f) => f.trim()).filter(Boolean),
+            stepTimeout: Number.isFinite(options.timeout) ? options.timeout : undefined,
+            envOverrides: options.env,
+            vars: options.var,
+            keepSandbox: !!options.keep,
+            dryRun: !!options.dryRun,
+            json: !!options.json,
+            jsonPath: typeof options.json === 'string' ? options.json : null,
+            annotations: options.annotations !== false,
+            reproducers: true,
+            profile: !!options.profile
         });
+        process.exitCode = exitCode;
     });
 
-// ── 4. Debug Sandbox ─────────────────────────────────────────────────────────
+// ── debug ────────────────────────────────────────────────────────────────────
+
 program
     .command('debug')
-    .description('Spawn an interactive debug sandbox with simulated CI environment vars')
-    .action(() => {
-        Logger.banner();
-        Debugger.start();
+    .description('open a shell with the CI environment, in an isolated copy of the project')
+    .option('--event <name>', 'event to simulate', 'push')
+    .option('--keep', 'keep the sandbox on disk afterwards')
+    .option('--expose-env', 'also export your .env values as plain variables (a runner does NOT do this)')
+    .action(async (options) => {
+        const exitCode = await Debugger.start({
+            cwd: process.cwd(),
+            event: options.event,
+            keep: !!options.keep,
+            exposeEnv: !!options.exposeEnv
+        });
+        process.exitCode = exitCode;
     });
 
-// ── 5. Analyze ───────────────────────────────────────────────────────────────
+// ── analyze ──────────────────────────────────────────────────────────────────
+
 program
-    .command('analyze [workflow]')
-    .description('Deep workflow intelligence: dependency graph, dead steps, complexity score & more')
-    .action((workflowFile = null) => {
+    .command('analyze')
+    .description('workflow intelligence: graph, dead steps, duplicates, cost, longest chain')
+    .argument('[target]', 'file, directory or project root', DEFAULT_TARGET)
+    .option('--json', 'print the analysis as JSON')
+    .option('--strict', 'exit non-zero when dead steps or unused outputs are found')
+    .action((target, options) => {
         Logger.banner();
-        Analyzer.analyze(workflowFile || '.github/workflows');
+        const report = Analyzer.analyze(target);
+        if (options.json) console.log(JSON.stringify(report, null, 2));
+        // The complexity score is a number for comparing workflows, not a
+        // verdict, so it never fails the command. Only real defects can.
+        if (options.strict && report.defects) {
+            const d = report.defects;
+            const total = d.deadSteps + d.unusedOutputs + d.duplicateSteps
+                + d.shellIssues + d.redundantJobs;
+            if (total > 0) {
+                Logger.error(`${total} actionable defect(s) found `
+                    + `(${describeDefects(d)}).`);
+                process.exitCode = 1;
+            }
+        }
     });
 
-// ── 6. Security Audit ────────────────────────────────────────────────────────
+// ── security ─────────────────────────────────────────────────────────────────
+
 program
-    .command('security [workflow]')
-    .description('Run dedicated security hardening audit (supply chain, injection, OIDC, etc.)')
-    .option('--report', 'Save security-report.md after audit')
-    .action((workflowFile = null, options) => {
+    .command('security')
+    .description('audit for template injection, supply chain, token scope and exfiltration')
+    .argument('[target]', 'file, directory or project root', DEFAULT_TARGET)
+    .option('--report [path]', 'write a markdown report', 'security-report.md')
+    .option('--json', 'print findings as JSON instead of text')
+    .action((target, options) => {
         Logger.banner();
-        Security.audit(workflowFile || '.github/workflows', { generateReport: !!options.report });
+        const { exitCode } = Security.audit(target, {
+            report: !!options.report,
+            reportPath: typeof options.report === 'string' ? options.report : 'security-report.md',
+            format: options.json ? 'json' : 'text'
+        });
+        // Critical and high findings are what make CI fail; lower ones do not.
+        process.exitCode = exitCode;
     });
 
-// ── 7. Profile ───────────────────────────────────────────────────────────────
+// ── profile ──────────────────────────────────────────────────────────────────
+
 program
     .command('profile')
-    .description('Show run history, trends, and performance analytics from past runs')
-    .action(() => {
+    .description('run history and trend against your own previous runs')
+    .argument('[target]', 'file, directory or project root', DEFAULT_TARGET)
+    .option('--limit <n>', 'how many runs to show', (v) => Number(v), 20)
+    .action((target, options) => {
         Logger.banner();
-        Profiler.showHistory();
+        Profiler.showHistory({ limit: options.limit });
+        const yaml = require('js-yaml');
+        for (const file of Checker.collectFiles(target)) {
+            let doc;
+            try {
+                doc = yaml.load(fs.readFileSync(file, 'utf8'), { filename: file });
+            } catch (_) { continue; }
+            if (!doc) continue;
+            const notes = Profiler.observations(doc, []);
+            if (notes.length) {
+                console.log('');
+                Logger.info(`Observations for ${path.relative(process.cwd(), file)}`);
+                Profiler.printObservations(notes);
+            }
+        }
     });
 
-// ── 8. Report ────────────────────────────────────────────────────────────────
+// ── report ───────────────────────────────────────────────────────────────────
+
 program
     .command('report')
-    .description('Generate reports from the last run (use aeroci run --report to record)')
-    .option('--format <formats>', 'Comma-separated formats: html,json,junit,markdown', 'html,json,junit,markdown')
-    .option('--diff <fileA:fileB>', 'Show structural diff between two workflow files')
-    .option('--changelog', 'Generate changelog from git history of workflow files')
+    .description('re-render the last run in other formats, diff two workflows, or list their history')
+    .addOption(new Option('--format <list>', 'comma-separated: json,markdown,html,junit')
+        .default('json,markdown,html,junit'))
+    .option('--run <dir>', 'the report directory to read from', '.aeroci-artifacts/report')
+    .option('--out <dir>', 'where to write the re-rendered reports')
+    .option('--diff <a:b>', 'structural diff between two workflow files')
+    .option('--history [dir]', 'commits that touched the workflow directory')
     .action((options) => {
         Logger.banner();
 
         if (options.diff) {
-            const [fileA, fileB] = options.diff.split(':');
-            if (fileA && fileB) {
-                Reporter.diff(fileA, fileB);
-            } else {
-                Logger.error('Usage: aeroci report --diff fileA.yml:fileB.yml');
+            // Split on the last colon so a Windows drive letter still works.
+            const cut = options.diff.lastIndexOf(':');
+            const fileA = cut > 1 ? options.diff.slice(0, cut) : '';
+            const fileB = cut > 1 ? options.diff.slice(cut + 1) : '';
+            if (!fileA || !fileB) {
+                Logger.error('Usage: aeroci report --diff old.yml:new.yml');
+                process.exitCode = 2;
+                return;
             }
+            const { changes } = Reporter.diff(fileA, fileB);
+            process.exitCode = changes > 0 ? 1 : 0;
             return;
         }
 
-        if (options.changelog) {
-            Reporter.generateChangelog();
+        if (options.history !== undefined) {
+            const dir = typeof options.history === 'string' ? options.history : DEFAULT_TARGET;
+            const history = Reporter.workflowHistory(dir);
+            if (!history.ok) {
+                Logger.error(`Could not read git history: ${history.reason}`);
+                process.exitCode = 1;
+                return;
+            }
+            if (history.commits.length === 0) {
+                Logger.warn(`No commits touch ${dir}.`);
+                return;
+            }
+            Logger.table(
+                ['Commit', 'Date', 'Subject'],
+                history.commits.map((c) => [c.hash, c.date, c.subject])
+            );
             return;
         }
 
-        // Check for last run JSON
-        const lastRun = path.join(process.cwd(), 'aeroci-run.json');
-        if (fs.existsSync(lastRun)) {
-            const data = JSON.parse(fs.readFileSync(lastRun, 'utf8'));
-            const reporter = new Reporter({ workflowName: data.meta?.workflow, workflowFile: data.meta?.file });
-            for (const step of (data.steps || [])) reporter.recordStep(step);
-            const formats = options.format.split(',').map(f => f.trim());
-            reporter.generateAll({ formats });
-        } else {
-            Logger.warn('No aeroci-run.json found. Run `aeroci run --report` first to record a run.');
-        }
+        rerenderLastRun(options);
     });
 
-// ── 9. Action Versions ────────────────────────────────────────────────────────
+/**
+ * Rebuild reports from a stored run.
+ *
+ * `aeroci run --report` writes the step detail as JSON. That is enough to
+ * re-render every other format later, so converting a run to a JUnit file for
+ * an existing CI collector does not mean executing the workflow again.
+ */
+function rerenderLastRun(options) {
+    const runDir = path.resolve(process.cwd(), options.run);
+    const indexFile = path.join(runDir, 'index.json');
+
+    if (!fs.existsSync(indexFile)) {
+        Logger.warn(`No run recorded in ${path.relative(process.cwd(), runDir) || options.run}.`);
+        Logger.note('  Produce one with:  aeroci run --report --format json');
+        process.exitCode = 1;
+        return;
+    }
+
+    let index;
+    try {
+        index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+    } catch (err) {
+        Logger.error(`${indexFile}: ${err.message}`);
+        process.exitCode = 1;
+        return;
+    }
+
+    const formats = String(options.format).split(',').map((f) => f.trim()).filter(Boolean);
+    const missing = formats.filter((f) => !['json', 'markdown', 'html', 'junit'].includes(f));
+    if (missing.length) {
+        Logger.error(`Unknown format(s): ${missing.join(', ')}`);
+        Logger.note('  Valid: json, markdown, html, junit');
+        process.exitCode = 2;
+        return;
+    }
+
+    Logger.info(`${index.workflows.length} workflow(s) recorded at ${index.generatedAt}`);
+    Logger.metric('Exit code', String(index.exitCode ?? 'unknown'));
+    console.log('');
+
+    const outDir = path.resolve(process.cwd(), options.out || runDir);
+    let rendered = 0;
+    let skipped = 0;
+
+    for (const workflow of index.workflows) {
+        const detailFile = workflow.detail
+            ? path.resolve(path.dirname(indexFile), workflow.detail)
+            : null;
+        if (!detailFile || !fs.existsSync(detailFile)) {
+            Logger.warn(`${workflow.name}: no step detail stored (run again with --report --format json)`);
+            skipped++;
+            continue;
+        }
+        const reporter = Reporter.fromJSON(JSON.parse(fs.readFileSync(detailFile, 'utf8')));
+        // Keep the same slug the run used, so re-rendering overwrites its own
+        // output rather than starting a second series of files.
+        reporter.slug = workflow.slug || reporter.slug;
+        reporter.generateAll({ formats, dir: outDir });
+        rendered++;
+    }
+
+    if (rendered) {
+        console.log('');
+        Logger.metric('Re-rendered', `${rendered} workflow(s) → ${path.relative(process.cwd(), outDir) || outDir}`);
+    }
+    if (skipped) {
+        Logger.note(`${skipped} workflow(s) had no stored step detail.`);
+        Logger.note('  A run keeps step detail only if it was asked for it:');
+        Logger.note('    aeroci run --report --format json');
+    }
+    process.exitCode = 0;
+}
+
+// ── versions ─────────────────────────────────────────────────────────────────
+
 program
-    .command('versions [workflow]')
-    .description('Check action versions in your workflows against known latest releases')
-    .action(async (workflowFile = null) => {
+    .command('versions')
+    .description('how every action is pinned, and whether AeroCI simulates it')
+    .argument('[target]', 'file, directory or project root', DEFAULT_TARGET)
+    .option('--check-remote', 'also ask the GitHub API for the latest release (needs the network)')
+    .action(async (target, options) => {
         Logger.banner();
-        const yaml = require('js-yaml');
-        const dir = path.resolve(process.cwd(), workflowFile || '.github/workflows');
-        let files = [];
-
-        if (fs.existsSync(dir)) {
-            const stat = fs.statSync(dir);
-            if (stat.isDirectory()) {
-                files = fs.readdirSync(dir)
-                    .filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))
-                    .map(f => path.join(dir, f));
-            } else {
-                files = [dir];
-            }
+        const report = Versions.inspect(target);
+        Versions.print(report);
+        if (options.checkRemote) {
+            console.log('');
+            await Versions.checkRemote(report.references);
         }
-
-        for (const file of files) {
-            const relPath = path.relative(process.cwd(), file);
-            console.log(`\n${colors.bright}${colors.cyan}🔍 Checking versions in: ${relPath}${colors.reset}`);
-            const doc = yaml.load(fs.readFileSync(file, 'utf8')) || {};
-            const steps = Object.values(doc.jobs || {}).flatMap(j => j.steps || []);
-            await Actions.checkActionVersions(steps);
-        }
+        process.exitCode = report.exitCode;
     });
 
-// ── 10. Web UI Dashboard ──────────────────────────────────────────────────────
+// ── ui ───────────────────────────────────────────────────────────────────────
+
 program
     .command('ui')
-    .description('Launch the interactive web dashboard (Velociradix) on port 3500')
-    .option('-p, --port <number>', 'Port to listen on', 3500)
+    .description('serve a read-only dashboard of the workflows in this project')
+    .option('-p, --port <number>', 'port to listen on', (v) => Number(v), 3500)
+    .addOption(new Option('--host <address>', 'address to bind to')
+        .default('127.0.0.1')
+        .env('AEROCI_HOST'))
     .action(async (options) => {
-        await Server.start(parseInt(options.port));
+        await Server.start({
+            port: options.port,
+            host: options.host,
+            cwd: process.cwd()
+        });
     });
 
-program.parse(process.argv);
+program.parseAsync(process.argv).catch((err) => {
+    Logger.error(err && err.message ? err.message : String(err));
+    if (process.env.AEROCI_DEBUG) console.error(err && err.stack);
+    process.exitCode = 1;
+});

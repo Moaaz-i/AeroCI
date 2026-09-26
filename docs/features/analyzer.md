@@ -1,161 +1,137 @@
-# Deep Workflow Analyzer
-
-> **`aeroci analyze`** — Features 1–10
-
-The Analyzer performs static intelligence checks on your workflow YAML files,
-helping you catch structural problems, inefficiencies, and hidden risks
-before running the pipeline.
-
----
-
-## Usage
+# Workflow analyzer
 
 ```bash
-aeroci analyze                             # scan all workflows
-aeroci analyze .github/workflows/ci.yml   # scan a specific file
-aeroci check --analyze                     # combine with pre-flight check
+aeroci analyze                          # every workflow in the project
+aeroci analyze .github/workflows/ci.yml # one file
+aeroci analyze --json                   # machine-readable
+aeroci analyze --strict                 # exit non-zero on dead steps / unused outputs
+aeroci check --analyze                  # as part of the pre-flight check
 ```
+
+It reads the YAML and reports what it finds. It never runs anything, so every
+finding is about the file, not about your machine.
 
 ---
 
-## Feature 1 — Step Dependency Graph
+## What it checks
 
-Maps `needs:` relationships between jobs and detects:
-- Which jobs run in parallel
-- Which jobs block others
-- Missing `needs:` on jobs that require prior outputs
+### Dead steps
 
-```
-Output example:
-  📊 Job Dependency Graph
-  build  →  test  →  deploy
-              ↘
-               lint (parallel)
-```
-
----
-
-## Feature 2 — Dead Step Detector
-
-Identifies steps that can **never execute** because they have an `if:` condition
-that always evaluates to `false`:
+A step that can never influence the result:
 
 ```yaml
-- name: Deploy to Prod
-  if: false          # ← flagged as dead step
+- name: Deploy
   run: ./deploy.sh
+  continue-on-error: false    # ← if this fails, everything below is dead code
+
+- name: Notify
+  run: ./notify.sh            # ← flagged: unreachable once the step above fails
 ```
 
----
+`continue-on-error: true` on the failing step makes the later steps live again,
+and the analyzer knows that. So does an `if: always()` or `if: failure()` on
+the later step.
 
-## Feature 3 — Duplicate Step Detector
+The point is not style. A step that cannot run is a step you are maintaining
+that has never worked.
 
-Finds identical `run:` scripts repeated across multiple steps or jobs.
-Suggests extracting them into a reusable composite action.
+### Duplicate steps
 
----
+The same `run:` script appearing in more than one job, or twice in one job —
+usually a job that should be a composite action, or a matrix that should have
+been a matrix.
 
-## Feature 4 — Step Duration Estimator
+### Unused outputs
 
-Provides intelligent time estimates for each step based on keywords:
+A step declares `id:` and writes to `$GITHUB_OUTPUT`, and nothing ever reads
+`steps.<id>.outputs.*`. Reported with the job it is in, so you can delete it.
 
-| Pattern | Estimated Duration |
-|---------|--------------------|
-| `npm install` / `pip install` | ~60s |
-| `npm test` / `pytest` | ~30s |
-| `npm run build` | ~45s |
-| `docker build` | ~120s |
-| `actions/checkout` | ~5s |
+### Redundant jobs
 
-These estimates are used by the Profiler's cost calculator.
+A job whose steps are a subset of another job's, or a job that does nothing a
+dependency already did.
 
----
+### Shell compatibility
 
-## Feature 5 — Shell Compatibility Checker
+A step that declares `shell: sh` (or the default on a non-bash runner) but
+writes bash: arrays, `[[ ]]`, process substitution `<(…)`, here-strings
+`<<<`.
 
-Detects `bash`-specific syntax used in steps that run with `sh` (the default):
+AeroCI runs steps the way a runner does — `bash --noprofile --norc -eo pipefail`
+— so this is about the shell your workflow *asks for*, not the one it gets.
 
-```yaml
-- run: |
-    arr=(a b c)     # ← bash array syntax, fails in sh
-    echo \${arr[0]}
-  shell: sh         # ← incompatible
-```
+### Cycles
 
-**Flagged patterns:**
-- Arrays: `arr=(...)`
-- `[[ ]]` double brackets
-- Process substitution: `<(...)`
-- Here-strings: `<<< "..."`
-
----
-
-## Feature 6 — Secret Flow Map
-
-Traces the path of each `secrets.*` reference through:
-- Workflow-level `env:` blocks
-- Job-level `env:` blocks
-- Step `env:` blocks
-- `run:` script inline references
-
-Flags secrets that flow into unsafe contexts (e.g., directly into `run:` scripts).
-
----
-
-## Feature 7 — Artifact Lifecycle Tracker
-
-Verifies that every `actions/upload-artifact` has a corresponding
-`actions/download-artifact` in a dependent job, and vice versa.
+`needs:` that forms a loop. GitHub rejects this at queue time, after you have
+pushed. The analyzer reports it with the cycle spelled out:
 
 ```
-⚠ [AeroCI Warning] Artifact "build-output" uploaded in job:build
-  but never downloaded in any dependent job
+Circular "needs" dependency: a → b → a
 ```
+
+### Concurrency conflicts
+
+Jobs sharing a `concurrency.group`. Two jobs in the same group can cancel each
+other, which is occasionally the intent and usually a surprise.
+
+### Matrix sanity
+
+For every `strategy.matrix`: the axes, how many combinations they produce,
+whether the count was truncated, `max-parallel`, `fail-fast`, and **axes that
+are constant across every combination** — a matrix dimension that varies
+nothing, which usually means a copy-paste that nobody noticed.
 
 ---
 
-## Feature 8 — Circular Job Dependency Detector
+## Complexity score
 
-GitHub Actions will fail at queue time if `needs:` creates a cycle.
-AeroCI detects it locally:
+A 0–100 number where **100 is simple and 0 is very complex** — the opposite
+direction from a score you might expect, because a high number is the good
+outcome.
 
-```yaml
-jobs:
-  a:
-    needs: b    # ← CYCLE!
-  b:
-    needs: a
-```
+| Score | Rating |
+|-------|--------|
+| 80–100 | simple |
+| 60–79 | moderate |
+| 40–59 | complex |
+| 0–39 | very complex |
 
-```
-⚠ Circular dependency detected: a → b → a
-```
+Every penalty is a pure function of the structure, and the breakdown is printed
+so the number is explainable rather than magic:
+
+| Component | Penalty |
+|-----------|---------|
+| Jobs | 1.5 per job beyond the second |
+| Steps | 1.2 per step beyond the sixth |
+| Graph depth | 4 per level beyond the first |
+| Coupling | 1.5 per `needs:` reference beyond one per job |
+| Expressions | 0.8 per template expression beyond the fifth |
+| Custom shells | 2 per step with an explicit `shell:` |
+| Matrix jobs | 2 per job with a matrix |
+| `continue-on-error` | 1.5 per step that uses it |
+| Cycles | 15 per cycle |
+
+The score is a way to compare two versions of a workflow, and a signal that a
+file has grown past what one person can hold in their head. It is not a quality
+verdict: a linear pipeline with twenty jobs is not better than a four-job graph
+with a cycle in it — the cycles cost you 15 points each and they should.
 
 ---
 
-## Feature 9 — Concurrency Group Conflict Analyzer
+## Exit codes
 
-Detects when multiple jobs use the same `concurrency.group` string,
-which could cause unexpected cancellations.
+`aeroci analyze` exits `0` normally. With `--strict` it exits non-zero when
+there are dead steps or unused outputs — the two findings that are almost
+always real problems. The rest are advisory.
 
 ---
 
-## Feature 10 — Workflow Complexity Score
+## On step-duration estimates
 
-Produces a single **0–100 score** rating the complexity of your workflow:
+The analyzer does not estimate how long your steps take, and this is worth
+saying plainly: a number here would be invented. It knows a step calls a
+package manager; it does not know whether your lockfile is warm, whether the
+registry is slow, or whether the cache hit.
 
-| Score | Label |
-|-------|-------|
-| 0–25 | 🟢 Simple |
-| 26–50 | 🟡 Moderate |
-| 51–75 | 🟠 Complex |
-| 76–100 | 🔴 Very Complex |
-
-**Factors considered:**
-- Number of jobs
-- Total step count
-- Matrix dimensions
-- Number of `needs:` edges
-- Use of dynamic expressions
-
-A high complexity score is a signal to split your workflow into multiple files.
+For real timings, run the workflow and use `aeroci run --profile` or
+`aeroci profile`, which report what was measured on your machine.

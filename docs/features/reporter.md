@@ -1,115 +1,160 @@
-# Multi-Format Reporting Engine
-
-> **`aeroci report`** — Features 31–40
-
-The Reporting Engine generates rich, structured reports in multiple formats for CI/CD pipeline integration, local debugging, and documentation.
-
----
-
-## Usage
+# Reports
 
 ```bash
-aeroci run --report                          # generate reports automatically after run
-aeroci report                                # generate from last run data
-aeroci report --format html,json             # generate specific formats
-aeroci report --diff workflowA.yml:workflowB.yml  # structural diff two workflows
-aeroci report --changelog                    # git history of workflow changes
+aeroci run --report                     # write reports for this run
+aeroci report                           # re-render the last run
+aeroci report --format html             # pick the formats
+aeroci report --out ~/reports           # write them somewhere else
+aeroci report --diff a.yml:b.yml        # structural diff of two workflows
+aeroci report --history                 # commits that touched the workflows
 ```
 
 ---
 
-## Feature 31 — JUnit XML Report (`aeroci-report.xml`)
+## What gets written
 
-Generates standard JUnit XML test reports compatible with Jenkins, GitLab CI, GitHub Actions test reporting, and test visualization dashboards.
+Everything goes under `.aeroci-artifacts/report/`, one set of files per
+workflow, named after the workflow file:
+
+```
+.aeroci-artifacts/
+├── history.jsonl          one line per run, appended by aeroci run
+└── report/
+    ├── index.json         what was run, and where each detail file is
+    ├── ci.json            the full record — the source of truth
+    ├── ci.md              GitHub Job Summary markdown
+    ├── ci.html            a standalone report you can open or share
+    └── ci.xml             JUnit XML
+```
+
+Override the location with `--report-dir`, or the per-invocation output with
+`--out`. Each workflow gets its own `<slug>.*`, so running several at once
+cannot make the last one overwrite the others.
+
+**The JSON is the source of truth.** The other three formats are re-renders of
+it, which is why `aeroci report --format html` can regenerate a report for a
+run from last week without re-running anything — and why changing formats can
+never change what the run actually did.
+
+---
+
+## The formats
+
+### JSON
+
+The complete record: the git state the run saw, every job and matrix
+instance, every step with its script, exit code, duration, outputs, log lines,
+warnings, and whether it was `not simulated`.
+
+This is the one to read when you want to know exactly what happened.
+
+### Markdown
+
+Meant for a GitHub job summary: status emoji, a table of steps with timings,
+and the failure detail for anything that failed. Paste it into
+`$GITHUB_STEP_SUMMARY` if you want it in the run page.
+
+### HTML
+
+A single self-contained file — no external assets, no network. Open it from
+disk or attach it. It is not interactive beyond the tables; it is a document
+that reads well.
+
+### JUnit XML
+
+For whatever consumes JUnit: Jenkins, GitLab, a test dashboard, or a CI system
+that wants to fail a build on a step failure.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="AeroCI" time="3.412" tests="4" failures="0">
-  <testsuite name="CI Workflow" time="3.412" tests="4" failures="0">
-    <testcase name="Checkout Code" classname="build-and-test" time="0.001"/>
-    ...
-  </testsuite>
-</testsuites>
+<testsuites name="AeroCI" time="0.067" tests="4" failures="0" errors="0" skipped="0">
+  <testsuite name="CI" time="0.067" tests="4" failures="0" errors="0" skipped="0">
+    <testsuite name="build" time="0.051" tests="3" failures="0" errors="0" skipped="0">
+      <testcase name="Build" classname="build" time="0.032">
+        <system-out>GITHUB_OUTPUT sha=abc123</system-out>
+      </testcase>
 ```
 
----
-
-## Feature 32 — Markdown Summary (`aeroci-summary.md`)
-
-Produces GitHub Job Summary-compatible Markdown reports featuring status emojis, step timing breakdowns, and failure details.
+Jobs are nested `testsuite`s, so a viewer can attribute a failure to a job and
+a step.
 
 ---
 
-## Feature 33 — JSON Run Report (`aeroci-run.json`)
+## GitHub annotations
 
-Exports complete execution metadata, step exit codes, timings, and environmental context as a structured JSON artifact.
-
----
-
-## Feature 34 — GitHub Annotations Emitter
-
-Outputs standard GitHub Actions workflow commands (`::error` / `::warning`) to stdout so IDEs and GitHub PR annotation viewers highlight failing lines directly.
+A failing step emits the workflow command a runner would:
 
 ```
-::error file=.github/workflows/main.yml,title=Step Failed — Run Tests::Job "build" step "Run Tests" failed with exit code 1
+::error file=.github/workflows/fail.yml,title=Run tests::job "t" step "Run tests" failed with exit code 3
 ```
 
----
-
-## Feature 35 — Exit Code Tracker
-
-Captures precise exit codes for every step command to accurately track failure points across multi-step jobs.
+Any tool that reads `::error` — an IDE, a PR view — highlights the right line
+without knowing anything about AeroCI. `--no-annotations` turns it off.
 
 ---
 
-## Feature 36 — Failed Step Reproducer
+## Reproducers
 
-When a step fails, AeroCI automatically outputs exact copy-paste shell commands to reproduce the failure locally with identical environment variables:
+When a step fails, the report ends with the command to run it again, in the
+same shell AeroCI used:
+
+```
+Reproduce a failure
+Each command runs the failing step in the same shell AeroCI used:
+
+  # 1 t > "Run tests"
+  $ bash --noprofile --norc -eo pipefail <<'AEROCI_REPRO'
+  exit 3
+  AEROCI_REPRO
+  # or: bash --noprofile --norc -eo pipefail -c 'exit 3'
+```
+
+The flags in that command are the real ones — `--noprofile --norc` so your own
+dotfiles cannot change the answer, and `-eo pipefail` so the semantics match
+the step's. Pasting it reproduces the failure instead of approximating it.
+
+Run it inside `aeroci debug` and you have the step's environment too.
+
+---
+
+## Step coverage
+
+The summary reports how much of the workflow actually ran:
+
+```
+  Steps                     : 4/4 executed
+  Step coverage             : 4/4 executed (100%)
+```
+
+A run that skipped half its steps because a dependency failed shows 50%, not
+100%. And a step that was `not simulated` is counted as not executed — which is
+the point.
+
+---
+
+## `--diff`
+
+A structural comparison of two workflow files: jobs and steps added or removed,
+and `on:` trigger changes. It compares structure, not text, so reindenting a
+file or reordering two steps of equal weight shows no diff.
 
 ```bash
-🔁 Failed Step Reproducers:
-  # build-and-test > "Run Tests"
-  $ CI=true GITHUB_ACTIONS=true bash -c 'npm test'
+aeroci report --diff ci.yml:release.yml
 ```
+
+The form is `a:b` — one argument, colon-separated, not two paths.
 
 ---
 
-## Feature 37 — Workflow Diff Reporter
+## `--history`
 
-Performs structural comparison between two workflow YAML files:
-- Added/removed jobs
-- Added/removed steps
-- Trigger (`on:`) changes
+The commits that touched a workflow directory, from `git log`. Useful after a
+run broke: the question is usually "what changed", and the answer is usually
+one of the last three commits.
 
 ```bash
-aeroci report --diff .github/workflows/ci.yml .github/workflows/ci-v2.yml
+aeroci report --history                    # .github/workflows
+aeroci report --history path/to/workflows  # somewhere else
 ```
 
----
-
-## Feature 38 — Changelog Generator
-
-Extracts Git commit history for workflow files under `.github/workflows/` to generate a changelog of pipeline modifications over time.
-
-```bash
-aeroci report --changelog
-```
-
----
-
-## Feature 39 — Step Coverage Reporter
-
-Calculates the percentage of total defined workflow steps actually executed during the run:
-
-```
-📈 Step Execution Coverage
-  • Steps Executed : 4/4
-  • Coverage       : 100%
-  • Progress       : ████████████████████ 100%
-```
-
----
-
-## Feature 40 — HTML Report Generator (`aeroci-report.html`)
-
-Generates a standalone, beautifully styled HTML dashboard containing execution metrics, status cards, and interactive step result tables.
+Outside a git repository it says so rather than printing an empty list.

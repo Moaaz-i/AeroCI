@@ -1,256 +1,233 @@
 # CLI Reference
 
-Complete reference for all `aeroci` commands.
-
----
-
-## Global Options
+Every flag below is copied from the tool's own `--help`. If a flag is not
+listed here, it does not exist.
 
 ```
 aeroci [command] [options]
 
-Options:
-  -V, --version   Print version number
-  -h, --help      Display help
+  -V, --version   output the version number
+  -h, --help      display help for command
 ```
+
+`target` means a workflow file, a directory of them, a glob, or a project root
+whose `.github/workflows/` should be scanned. It defaults to
+`.github/workflows`.
 
 ---
 
-## Commands
+## `aeroci init`
 
-### `aeroci init`
+Create `.aeroci.json`, a sample workflow, `.env.example`, and a `.gitignore`
+entry.
 
-Initialize AeroCI in the current project directory.
+| Flag | Effect |
+|------|--------|
+| `-f, --force` | overwrite files that already exist |
+| `--no-sample` | do not write a sample workflow |
+| `--no-env` | do not write `.env.example` |
 
-```bash
-aeroci init
-```
-
-**Creates:**
-- `.aeroci.json` — local configuration
-- `.github/workflows/main.yml` — sample workflow (if missing)
-
----
-
-### `aeroci check [workflow]`
-
-Pre-flight audit of workflow files.
-
-```bash
-aeroci check                        # scan .github/workflows/
-aeroci check path/to/workflow.yml   # scan a specific file
-aeroci check --security             # also run security audit
-aeroci check --analyze              # also run deep analyzer
-```
-
-**Options:**
-
-| Flag | Description |
-|------|-------------|
-| `--security` | Run the [Security Hardening Engine](./features/security.md) |
-| `--analyze` | Run the [Deep Workflow Analyzer](./features/analyzer.md) |
-
-**What it checks:**
-- ✅ YAML syntax validity
-- ✅ Missing `name`, `on`, `jobs` fields
-- ✅ Deprecated action versions (`@v1`, `@v2`)
-- ✅ npm package typo guard (live npm registry check)
-- ✅ Hardcoded credentials detection
-- ✅ Sudo usage warnings
-- ✅ Required secrets vs local `.env` comparison
-- ✅ Matrix strategy audit
+Without `--force` an existing file is left alone and the run says so. You do
+not need this file: `aeroci run` works without it, on defaults.
 
 ---
 
-### `aeroci run [workflow]`
+## `aeroci check [target]`
 
-Simulate the full CI pipeline inside an isolated ephemeral sandbox.
+Validate workflows against what a runner actually requires.
 
-```bash
-aeroci run                           # run all workflows in .github/workflows/
-aeroci run path/to/workflow.yml      # run a specific workflow
-aeroci run --only-job build          # run only the "build" job
-aeroci run --report                  # generate HTML/JUnit/JSON/MD reports after run
-aeroci run --timeout 5               # set per-step timeout to 5 minutes
-aeroci run --env NODE_ENV=production # inject environment variables
-aeroci run --env KEY=val --env K2=v2 # multiple injections
+| Flag | Effect |
+|------|--------|
+| `--security` | also run the security audit |
+| `--analyze` | also run the workflow analyzer |
+| `--network` | also ask the npm registry whether each installed package exists |
+
+**What it checks:** YAML syntax and required fields (`name`, `on`, `jobs`);
+action references and how they are pinned; `secrets.*` against your `.env`;
+the job graph (unresolvable `needs`, cycles); matrix definitions; and the
+shell your `run:` steps ask for.
+
+`--network` is off by default. It shells out to `npm view` once per package,
+which is a request per package to a registry you did not ask about. Turn it on
+when you want the typo guard:
+
+```
+error  job "install" step 1: package "exprees" does not exist on the npm registry
 ```
 
-**Options:**
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--only-job <id>` | string | — | Run only a specific job by ID |
-| `--report` | boolean | false | Generate all report formats after run |
-| `--timeout <min>` | number | 10 | Per-step timeout in minutes |
-| `--env <KEY=VAL>` | string | — | Inject env vars (repeatable) |
-| `-d, --debug` | boolean | false | Enter interactive debug shell on failure |
-
-**How it works:**
-1. Clones project to an isolated temp directory using APFS `clonefile()` (~10ms)
-2. Symlinks `node_modules` (no copy needed)
-3. Executes each workflow step in the sandbox
-4. Prints profiler report, coverage, cost estimate
-5. Auto-deletes the sandbox on exit
+**Exit code:** `1` if there are errors. Warnings are advisory and exit `0`.
 
 ---
 
-### `aeroci debug`
+## `aeroci run [target]`
 
-Spawn an interactive sub-shell pre-configured with the simulated GitHub Actions environment.
+Execute workflows in an isolated sandbox — one per job and per matrix
+combination. See [sandbox.md](./sandbox.md).
+
+| Flag | Effect |
+|------|--------|
+| `-d, --debug` | drop into a matching shell if a step fails |
+| `--only-job <id>` | run only this job id |
+| `--event <name>` | event to simulate (default `push`) |
+| `--timeout <minutes>` | per-step timeout; `timeout-minutes:` in the workflow wins |
+| `--env <KEY=VALUE>` | set an environment variable (repeatable) |
+| `--var <KEY=VALUE>` | set a repository variable for `vars.NAME` (repeatable) |
+| `--keep` | keep the sandbox on disk after the run |
+| `--dry-run` | resolve and print what would run, without running it |
+| `--report` | write reports under `.aeroci-artifacts/report/` |
+| `--report-dir <dir>` | where those reports go |
+| `--format <list>` | `json,markdown,html,junit` (default: all four) |
+| `--json [path]` | write the run summary as JSON |
+| `--no-annotations` | do not emit `::error` / `::warning` workflow commands |
+| `--profile` | show the timing table and the cost projection |
+
+**Exit code:** `0` when every job succeeded, `1` when any step failed, and `7`
+when a step timed out.
 
 ```bash
-aeroci debug
+aeroci run                                  # everything in .github/workflows/
+aeroci run ci.yml                           # one file
+aeroci run 'release-*.yml'                  # a glob
+aeroci run --only-job build --event pull_request
+aeroci run --report --format json,html
+aeroci run --dry-run                        # what would run, and why
 ```
 
-Environment variables set inside the shell:
-```
-CI=true
-GITHUB_ACTIONS=true
-GITHUB_RUN_ID=10001
-GITHUB_REF=refs/heads/main
-AEROCI_DEBUG=1
-# + all keys from your .env file
-```
-
-Exit with `Ctrl+D` or `exit`.
+`--dry-run` resolves expressions, the job graph and matrix expansion, then
+stops. It is the fast way to see what a workflow *would* do — including which
+steps a failing dependency would skip — without spending the time.
 
 ---
 
-### `aeroci analyze [workflow]`
+## `aeroci debug`
 
-Run the [Deep Workflow Analyzer](./features/analyzer.md) — 10 intelligence checks.
+Open a shell with the same CI environment, in the same kind of isolated copy,
+so a failing command can be re-run by hand.
 
-```bash
-aeroci analyze
-aeroci analyze .github/workflows/deploy.yml
-```
+| Flag | Effect |
+|------|--------|
+| `--event <name>` | event to simulate (default `push`) |
+| `--keep` | keep the sandbox on disk afterwards |
+| `--expose-env` | also export your `.env` values as plain variables |
 
-**Checks:**
-1. Step dependency graph
-2. Dead step detector
-3. Duplicate step detector
-4. Step duration estimator
-5. Shell compatibility checker
-6. Secret flow map
-7. Artifact lifecycle tracker
-8. Circular job dependency detector
-9. Concurrency group conflict analyzer
-10. Workflow complexity score (0–100)
+`--expose-env` is a deliberate departure from a runner, which exposes a secret
+only through the `secrets` context. The session says so when it is on.
+
+Log masking is not active in this shell — treat anything you `cat` as if it had
+been printed in a report.
 
 ---
 
-### `aeroci security [workflow]`
+## `aeroci analyze [target]`
 
-Dedicated [Security Hardening Audit](./features/security.md) — 10 security checks.
+Structural intelligence: the job graph in dependency order, dead steps,
+duplicate steps, outputs nothing reads, redundant jobs, matrix expansion, the
+longest chain, and a complexity score with the penalties that produced it.
 
-```bash
-aeroci security
-aeroci security --report            # save security-report.md
-```
-
-**Options:**
-
-| Flag | Description |
-|------|-------------|
-| `--report` | Save findings to `security-report.md` |
-
-**Checks:**
-- Supply chain attack detection
-- Overly-broad `write-all` permissions
-- Environment variable injection risks
-- Script injection via user-controlled input
-- Hardcoded secrets in env blocks
-- `pull_request_target` + checkout vulnerability
-- Self-hosted runner sensitive operation risks
-- OIDC token scope validation
-- Dependency confusion guard
+| Flag | Effect |
+|------|--------|
+| `--json` | print the analysis as JSON |
+| `--strict` | exit non-zero when dead steps or unused outputs are found |
 
 ---
 
-### `aeroci profile`
+## `aeroci security [target]`
 
-Display run history, timing trends, and performance analytics.
+Audit for template injection through untrusted context, script injection into
+the shell, over-broad or missing `permissions:`, actions pinned to a mutable
+tag, `pull_request_target` combined with a checkout, and hardcoded credential
+patterns.
 
-```bash
-aeroci profile
-```
-
-Shows the last 20 runs from `.aeroci-artifacts/history.jsonl`:
-
-```
-📊 Run History (last 5 run(s)):
-┌──────────────────────────────────────────────────────────────┐
-│ Timestamp          Workflow        Duration  Steps  Peak Mem │
-├──────────────────────────────────────────────────────────────┤
-│ 8/12/2026 7:34 AM  Build & Test    3.40s     4/4    12MB     │
-└──────────────────────────────────────────────────────────────┘
-```
+| Flag | Effect |
+|------|--------|
+| `--report [path]` | write a markdown report (default `security-report.md`) |
+| `--json` | print findings as JSON instead of text |
 
 ---
 
-### `aeroci report`
+## `aeroci profile [target]`
 
-Generate or view reports from the last run.
+Your own run history, and a trend against it.
 
-```bash
-aeroci run --report                        # generate reports during run
-aeroci report                              # re-generate from last run data
-aeroci report --format html                # specific format only
-aeroci report --format html,junit          # multiple formats
-aeroci report --diff fileA.yml:fileB.yml   # structural diff two workflows
-aeroci report --changelog                  # git history of workflow changes
-```
+| Flag | Effect |
+|------|--------|
+| `--limit <n>` | how many runs to show (default 20) |
 
-**Options:**
-
-| Flag | Description |
-|------|-------------|
-| `--format <list>` | Comma-separated: `html`, `json`, `junit`, `markdown` |
-| `--diff <a:b>` | Show structural diff between two workflow files |
-| `--changelog` | Generate changelog from git history |
-
-**Output files:**
-
-| Format | File |
-|--------|------|
-| HTML | `aeroci-report.html` |
-| JSON | `aeroci-run.json` |
-| JUnit XML | `aeroci-report.xml` |
-| Markdown | `aeroci-summary.md` |
-| Security | `security-report.md` |
+History is read from `.aeroci-artifacts/history.jsonl`, appended by
+`aeroci run`. It is your machine's record, not an estimate of what GitHub
+would have charged — see the note on cost below.
 
 ---
 
-### `aeroci versions [workflow]`
+## `aeroci report`
 
-Check action versions in your workflows against the known latest releases.
+Re-render the last run in other formats, diff two workflows, or list the
+commits that touched them.
+
+| Flag | Effect |
+|------|--------|
+| `--format <list>` | `json,markdown,html,junit` (default: all four) |
+| `--run <dir>` | the report directory to read from (default `.aeroci-artifacts/report`) |
+| `--out <dir>` | where to write the re-rendered reports |
+| `--diff <a:b>` | structural diff between two workflow files |
+| `--history [dir]` | commits that touched the workflow directory |
 
 ```bash
-aeroci versions
-aeroci versions .github/workflows/deploy.yml
+aeroci report --format markdown             # re-render from the stored JSON
+aeroci report --diff ci.yml:release.yml     # what changed between two files
+aeroci report --history                     # from git log
 ```
 
-**Example output:**
-```
-⚠ actions/checkout@v3  →  Latest: v4
-⚠ actions/setup-node@v3  →  Latest: v4
-✔ actions/cache@v4  →  Up to date
-```
+The JSON is the source of truth. Every other format is a re-render of it, so
+switching formats cannot change what the run actually did.
 
 ---
 
-### `aeroci ui`
+## `aeroci versions [target]`
 
-Launch the local web dashboard (powered by Velociradix) at `http://localhost:3500`.
+How every action is pinned — SHA, short SHA, tag, moving branch, local action
+or container image — and whether AeroCI simulates it.
 
-```bash
-aeroci ui
-aeroci ui --port 4000     # custom port
-```
+| Flag | Effect |
+|------|--------|
+| `--check-remote` | also ask the GitHub API for the latest release |
 
-**Options:**
+`--check-remote` needs the network and is off by default. Lookups run six at a
+time, so ten actions cost two round trips rather than ten.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-p, --port <n>` | 3500 | Port to listen on |
+---
+
+## `aeroci ui`
+
+Serve a read-only dashboard of the workflows in this project.
+
+| Flag | Effect |
+|------|--------|
+| `-p, --port <number>` | port to listen on (default 3500) |
+| `--host <address>` | address to bind to (default `127.0.0.1`, or `$AEROCI_HOST`) |
+
+Read-only, and bound to localhost by default. Binding it to `0.0.0.0` puts
+your workflow source on the network — `--host 0.0.0.0` is a deliberate act.
+
+---
+
+## Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `AERO_UNMASK_SECRETS=1` | turn log masking off. **Not** a faithful simulation — nothing you run under it is safe to share. |
+| `AEROCI_HOST` | default bind address for `aeroci ui` |
+| `AEROCI_DEBUG` | print stack traces on failure |
+| `NO_COLOR` | disable colour |
+
+---
+
+## On the cost projection
+
+`aeroci run --profile` prints a table of step time and a dollar figure derived
+from GitHub's published per-minute prices for the runner labels it recognises.
+
+That figure is a **projection from your local timings**, not a measurement of
+anything GitHub billed. It is useful for comparing one version of a workflow
+against another. It is not a quote, and it does not include the minutes a job
+spent waiting in a queue.

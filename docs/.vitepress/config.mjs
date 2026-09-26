@@ -2,9 +2,8 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: "AeroCI",
-  description: "Local Digital Twin & CI Pipeline Simulator for GitHub Actions",
+  description: "Run, check, analyse and audit your GitHub Actions workflows locally",
   base: '/AeroCI/',
-  ignoreDeadLinks: true,
   markdown: {
     vPre: true
   },
@@ -15,13 +14,10 @@ export default defineConfig({
       { text: 'CLI Reference', link: '/cli-reference' },
       { text: 'Configuration', link: '/configuration' },
       {
-        text: 'Features',
+        text: 'Details',
         items: [
-          { text: 'Workflow Analyzer', link: '/features/analyzer' },
-          { text: 'Performance Profiler', link: '/features/profiler' },
-          { text: 'Security Audit', link: '/features/security' },
-          { text: 'Multi-Format Reports', link: '/features/reporter' },
-          { text: 'Action Simulator', link: '/features/actions' }
+          { text: 'Sandbox & Isolation', link: '/sandbox' },
+          { text: 'Action support', link: '/features/actions' }
         ]
       }
     ],
@@ -37,13 +33,13 @@ export default defineConfig({
         ]
       },
       {
-        text: 'Enterprise Features',
+        text: 'In depth',
         items: [
-          { text: 'Workflow Analyzer (1-10)', link: '/features/analyzer' },
-          { text: 'Performance Profiler (11-20)', link: '/features/profiler' },
-          { text: 'Security Audit (21-30)', link: '/features/security' },
-          { text: 'Multi-Format Reports (31-40)', link: '/features/reporter' },
-          { text: 'Action Simulator (41-50)', link: '/features/actions' }
+          { text: 'Action support', link: '/features/actions' },
+          { text: 'Workflow analyzer', link: '/features/analyzer' },
+          { text: 'Profiler', link: '/features/profiler' },
+          { text: 'Security audit', link: '/features/security' },
+          { text: 'Reports', link: '/features/reporter' }
         ]
       },
       {

@@ -3,190 +3,260 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AeroCI v2.0.0 — Digital Twin Dashboard</title>
+    <title>AeroCI — local workflow dashboard</title>
     <style>
         :root {
             --bg: #0b0f19;
             --card-bg: rgba(22, 27, 34, 0.85);
             --border: #30363d;
             --text: #c9d1d9;
-            --cyan: #58a6ff;
+            --dim: #8b949e;
+            --blue: #58a6ff;
             --green: #3fb950;
             --purple: #bc8cff;
             --yellow: #d29922;
             --red: #f85149;
         }
+        * { box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background: var(--bg);
             color: var(--text);
             margin: 0;
-            padding: 40px;
+            padding: 32px;
         }
-        .header {
+        header {
             display: flex;
-            align-items: center;
+            align-items: baseline;
             justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
             border-bottom: 1px solid var(--border);
-            padding-bottom: 24px;
-            margin-bottom: 35px;
+            padding-bottom: 20px;
+            margin-bottom: 28px;
         }
-        .title {
-            font-size: 28px;
-            font-weight: 800;
-            color: #fff;
-            display: flex;
-            align-items: center;
-            gap: 14px;
-        }
-        .badge {
-            background: linear-gradient(135deg, rgba(88, 166, 255, 0.2), rgba(188, 140, 255, 0.2));
-            color: var(--cyan);
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 13px;
-            font-weight: 600;
-            border: 1px solid rgba(88, 166, 255, 0.4);
-        }
+        h1 { font-size: 22px; font-weight: 700; color: #fff; margin: 0; }
+        h2 { font-size: 16px; font-weight: 600; color: #fff; margin: 32px 0 12px; }
+        .meta { color: var(--dim); font-size: 13px; }
+        .meta code { color: var(--blue); }
+
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 24px;
-            margin-bottom: 35px;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 16px;
         }
         .card {
             background: var(--card-bg);
             border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 24px;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            border-radius: 12px;
+            padding: 18px;
         }
-        .card h3 {
-            margin-top: 0;
-            font-size: 13px;
-            color: #8b949e;
+        .card .label {
+            font-size: 11px;
+            color: var(--dim);
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 0.6px;
         }
-        .card .stat {
-            font-size: 36px;
-            font-weight: 800;
-            color: #fff;
-            margin-top: 8px;
-        }
-        .status-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            color: var(--green);
-            font-weight: 600;
-            background: rgba(63, 185, 80, 0.1);
-            padding: 8px 16px;
-            border-radius: 20px;
-            border: 1px solid rgba(63, 185, 80, 0.3);
-        }
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: var(--green);
-            box-shadow: 0 0 12px var(--green);
-        }
+        .card .value { font-size: 28px; font-weight: 700; color: #fff; margin-top: 6px; }
+
         table {
             width: 100%;
             border-collapse: collapse;
             background: var(--card-bg);
             border: 1px solid var(--border);
-            border-radius: 16px;
+            border-radius: 12px;
             overflow: hidden;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
         }
-        th, td {
-            padding: 16px 22px;
-            text-align: left;
-            border-bottom: 1px solid var(--border);
-        }
-        th {
-            background: rgba(33, 38, 45, 0.9);
-            color: #8b949e;
+        th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+        th { background: rgba(33, 38, 45, 0.9); color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        tr:last-child td { border-bottom: none; }
+        td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+        .file { color: var(--blue); }
+        .name { color: #fff; font-weight: 600; }
+
+        .pill {
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 999px;
             font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
+            font-weight: 600;
         }
+        .pill.ok    { color: var(--green);  background: rgba(63,185,80,.12);  border: 1px solid rgba(63,185,80,.3); }
+        .pill.warn  { color: var(--yellow); background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.3); }
+        .pill.bad   { color: var(--red);    background: rgba(248,81,73,.12);  border: 1px solid rgba(248,81,73,.3); }
+        .pill.none  { color: var(--dim);    background: rgba(139,148,158,.1);  border: 1px solid rgba(139,148,158,.25); }
+
+        .note {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--yellow);
+            border-radius: 8px;
+            padding: 14px 18px;
+            color: var(--dim);
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        .note strong { color: var(--text); }
+        .note a { color: var(--blue); }
+        .muted { color: var(--dim); }
     </style>
 </head>
 <body>
-    <div class="header">
-        <div class="title">
-            <span>✈️ AeroCI v2.0.0</span>
-            <span class="badge">VelociRadix Engine</span>
-        </div>
-        <div class="status-pill">
-            <span class="status-dot"></span>
-            <span>Digital Twin Active (0.00ms Sync)</span>
-        </div>
+    <header>
+        <h1>AeroCI <span class="muted" style="font-weight:400;">local dashboard</span></h1>
+        <div class="meta" id="env">reading project…</div>
+    </header>
+
+    <!--
+        Everything below is read from the project on disk. There is no
+        "minutes saved" or "cost saved" figure here, because nothing in a
+        static read of your workflow files can produce one. Use
+        `aeroci run --profile` for a measured timing table and an explicitly
+        labelled cost projection.
+    -->
+    <div class="grid" id="counts"></div>
+
+    <h2>Workflows</h2>
+    <div id="workflows"><p class="muted">Loading…</p></div>
+
+    <h2>What this page is</h2>
+    <div class="note">
+        <p style="margin:0 0 10px;">
+            This is a <strong>static read</strong> of <code>.github/workflows</code>: file names,
+            job counts, step counts and triggers, parsed on every request. It is not a run.
+        </p>
+        <p style="margin:0 0 10px;">
+            Nothing here has been executed, so nothing here is verified. To check a
+            workflow, run <code>aeroci check</code>. To execute it, run
+            <code>aeroci run</code> — and read what it prints about steps it could
+            not simulate.
+        </p>
+        <p style="margin:0;">
+            The API is this project's own, on this machine: <code>GET /api/status</code>,
+            <code>/api/workflows</code>, <code>/api/workflow?file=…</code>,
+            <code>/api/history</code>, <code>/api/health</code>.
+        </p>
     </div>
 
-    <div class="grid">
-        <div class="card">
-            <h3>Remote CI Minutes Saved</h3>
-            <div class="stat" style="color: var(--green);">420+ Mins</div>
-        </div>
-        <div class="card">
-            <h3>Estimated Cost Saved</h3>
-            <div class="stat" style="color: var(--cyan);">$84.00 USD</div>
-        </div>
-        <div class="card">
-            <h3>Static Analysis Guards</h3>
-            <div class="stat" style="color: var(--purple);">15 Guards</div>
-        </div>
-        <div class="card">
-            <h3>Simulated Engine</h3>
-            <div class="stat" style="color: var(--yellow);">VelociRadix HTTP</div>
-        </div>
-    </div>
+<script>
+'use strict';
 
-    <h2 style="font-size: 20px; margin-bottom: 16px;">📋 Monitored Local Workflows</h2>
-    <div id="workflows-table">
-        <p style="color: #8b949e;">Loading active workflows data from VelociRadix API...</p>
-    </div>
+// Every value rendered here comes from YAML on disk, which is untrusted
+// input. Building HTML by concatenation would let a workflow named
+// `<img onerror=...>` run script in this page, so text goes in as text.
+function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+}
 
-    <script>
-        fetch('/api/status')
-            .then(res => res.json())
-            .then(data => {
-                const container = document.getElementById('workflows-table');
-                if (data.workflows && data.workflows.length > 0) {
-                    let rows = data.workflows.map(w => `
-                        <tr>
-                            <td><strong>${w.name}</strong></td>
-                            <td><code style="color: var(--cyan);">${w.file}</code></td>
-                            <td>${w.jobsCount} Job(s)</td>
-                            <td><code>${w.triggers}</code></td>
-                            <td><span style="color: var(--green); font-weight: 600;">✔ Verified</span></td>
-                        </tr>
-                    `).join('');
-                    container.innerHTML = `
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Workflow Name</th>
-                                    <th>File Location</th>
-                                    <th>Jobs</th>
-                                    <th>Triggers</th>
-                                    <th>Pre-flight Audit</th>
-                                </tr>
-                            </thead>
-                            <tbody>\${rows}</tbody>
-                        </table>
-                    `;
-                } else {
-                    container.innerHTML = '<p style="color: var(--yellow);">No active workflows found in .github/workflows</p>';
-                }
-            })
-            .catch(err => {
-                document.getElementById('workflows-table').innerHTML = '<p style="color: var(--red);">Failed to load API status from VelociRadix engine.</p>';
-            });
-    </script>
+function cell(row, className, text) {
+    row.appendChild(el('td', className, text));
+}
+
+function render(data) {
+    document.getElementById('env').textContent =
+        `${data.name} · AeroCI ${data.aeroci} · node ${data.node} · ${data.host}`;
+
+    const counts = document.getElementById('counts');
+    counts.textContent = '';
+    const cards = [
+        ['Workflow files', data.counts.workflows, ''],
+        ['Jobs', data.counts.jobs, ''],
+        ['Steps declared', data.counts.steps, ''],
+        ['Files that do not parse', data.counts.parseErrors,
+            data.counts.parseErrors ? 'bad' : 'ok']
+    ];
+    for (const [label, value, tone] of cards) {
+        const card = el('div', 'card');
+        card.appendChild(el('div', 'label', label));
+        const v = el('div', 'value', value);
+        if (tone === 'bad') v.style.color = 'var(--red)';
+        if (tone === 'ok' && value === 0) v.style.color = 'var(--green)';
+        card.appendChild(v);
+        counts.appendChild(card);
+    }
+
+    const host = document.getElementById('workflows');
+    host.textContent = '';
+
+    if (!data.workflows.length) {
+        host.appendChild(el('p', 'muted',
+            'No workflow files in .github/workflows. Run `aeroci init` for a starter.'));
+        return;
+    }
+
+    const table = el('table');
+    const head = el('thead');
+    const headRow = el('tr');
+    for (const label of ['Workflow', 'File', 'Jobs', 'Steps', 'Matrix', 'Triggers', 'Parses']) {
+        headRow.appendChild(el('th', null, label));
+    }
+    head.appendChild(headRow);
+    table.appendChild(head);
+
+    const body = el('tbody');
+    for (const w of data.workflows) {
+        const row = el('tr');
+        cell(row, 'name', w.name);
+
+        const fileCell = el('td');
+        fileCell.appendChild(el('code', 'file', w.file));
+        row.appendChild(fileCell);
+
+        cell(row, 'num', w.jobs);
+        cell(row, 'num', w.steps);
+        cell(row, 'num', w.matrixJobs);
+
+        const triggers = el('td');
+        for (const t of w.triggers) {
+            const code = el('code', null, t);
+            code.style.color = 'var(--purple)';
+            triggers.appendChild(code);
+            triggers.appendChild(document.createTextNode(' '));
+        }
+        if (!w.triggers.length) triggers.appendChild(el('span', 'muted', 'none'));
+        row.appendChild(triggers);
+
+        const parses = el('td');
+        parses.appendChild(w.parseError
+            ? el('span', 'pill bad', 'no')
+            : el('span', 'pill ok', 'yes'));
+        row.appendChild(parses);
+
+        body.appendChild(row);
+    }
+    table.appendChild(body);
+    host.appendChild(table);
+
+    const broken = data.workflows.filter(w => w.parseError);
+    if (broken.length) {
+        const note = el('div', 'note');
+        note.style.marginTop = '16px';
+        note.style.borderLeftColor = 'var(--red)';
+        for (const w of broken) {
+            note.appendChild(el('div', null, `${w.file}: ${w.parseError}`));
+        }
+        host.appendChild(note);
+    }
+}
+
+fetch('/api/status')
+    .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+    })
+    .then(render)
+    .catch(err => {
+        const host = document.getElementById('workflows');
+        host.textContent = '';
+        const note = el('div', 'note');
+        note.style.borderLeftColor = 'var(--red)';
+        note.appendChild(el('div', null, `Could not read /api/status: ${err.message}`));
+        host.appendChild(note);
+    });
+</script>
 </body>
 </html>

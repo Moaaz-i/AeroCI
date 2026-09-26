@@ -1,178 +1,153 @@
-# Performance Profiler
-
-> **`aeroci profile`** — Features 11–20
-
-The Profiler automatically records every run, measures per-step timing,
-tracks memory usage, estimates costs, and detects performance trends.
-
----
-
-## Usage
+# Profiler
 
 ```bash
-aeroci run              # profiler runs automatically
-aeroci profile          # view run history and trends
+aeroci run --profile        # timing table, cost projection and trend for this run
+aeroci profile             # your run history
+aeroci profile --limit 50  # how many runs to show
 ```
+
+History lives in `.aeroci-artifacts/history.jsonl`, one JSON line per run,
+appended by `aeroci run`. It is a record of what happened on **your machine**,
+and everything below is measured there.
+
+The tables below are real output from a four-step workflow, copied as printed.
 
 ---
 
-## Feature 11 — Per-Step Timing Table
-
-After every `aeroci run`, a timing table is printed:
+## The timing table
 
 ```
-⏱  Per-Step Timing Breakdown
+🐢 Slowest steps
 
-┌────────────────────────────────────────────────────────────────────────────┐
-│     Job           Step                    Duration   Relative              │
-├────────────────────────────────────────────────────────────────────────────┤
-│ ✔   build         Checkout                1ms        ░░░░░░░░░░░░░░░░░░░░  │
-│ ✔   build         Setup Node.js           1ms        ░░░░░░░░░░░░░░░░░░░░  │
-│ ✔   build         Install dependencies    3241ms     ████████████████████  │
-│ ✔   build         Run tests               892ms      ████████░░░░░░░░░░░░  │
-└────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ Job     Step                 Time  Share                 │
+├──────────────────────────────────────────────────────────┤
+│ build   Build                37ms  100%  ████████████████ │
+│ build   Report               16ms  43%   ███████         │
+│ notify  echo "notified "     15ms  41%   ███████         │
+│ build   actions/checkout@v4  1ms   3%    █               │
+└──────────────────────────────────────────────────────────┘
 ```
 
-The `Relative` column shows a mini bar chart proportional to each step's
-share of the total runtime.
+Real measurements of real processes. A step that took 3.2s because `npm ci`
+downloaded 248 packages shows 3.2s, and nothing is estimated — a step that
+could not be timed is not in the table.
+
+The `Share` column is each step's fraction of the slowest step, not of the
+total. It answers "what is worth looking at", which is why the baseline is the
+maximum rather than the sum.
 
 ---
 
-## Feature 12 — Slowest Step Highlighter
-
-The slowest step is always highlighted at the bottom of the timing report:
+## The cost projection
 
 ```
-  Slowest step: "Install dependencies" in job build (3241ms)
+💵 Cost on a GitHub-hosted ubuntu-latest
+  Measured step time        : 69ms
+  Billable minutes          : 2 (each job rounds up to 1 minute · $0.008/min)
+  Projected cost            : $0.016
+     This is a projection from the durations measured above, not a measurement of a
+     hosted run. Real time is usually higher, so treat it as a lower bound.
 ```
+
+How it is computed: your measured step time is grouped by job, each job is
+rounded **up** to a whole minute, and multiplied by the list price for that OS.
+
+| Runner | USD/min |
+|--------|---------|
+| Linux | 0.008 |
+| Windows | 0.016 |
+| macOS | 0.08 |
+
+The two jobs above took 69ms between them and bill as 2 minutes, which is why
+the figure is `$0.016` and not `$0.009`. That rounding is GitHub's, not a
+penalty the tool added.
+
+Two things it cannot include, both of which make a real run slower: a hosted
+runner spends real time you are not measuring — cloning the repo, downloading
+the toolchain, starting the VM — and it spends time in the queue, which is
+usually the largest term of all.
+
+Use it to compare two versions of a workflow against each other. It is not a
+quote, and the tool says so in the output every time rather than only here.
 
 ---
 
-## Feature 13 — CI Cost Estimator
-
-Calculates how much money and time AeroCI saved vs running on GitHub Actions:
+## Run history
 
 ```
-💰 CI Cost & Time Savings
-  • Local Execution Time     : 4.14s
-  • Est. GitHub Actions Time : 34.14s (incl. runner setup)
-  • Time Saved               : 30.00s  (8.2x faster)
-  • Est. Billable Minutes    : 0.57 min
-  • Est. Cost Saved          : $0.0046 USD
+ℹ [AeroCI] Run history — last 10 of 10
+
+┌───────────────────────────────────────────────────────────────┐
+│ When                   Workflow  Step time  Pass  Fail  Heap  │
+├───────────────────────────────────────────────────────────────┤
+│ 9/26/2026, 2:50:52 PM  CI        62ms       4     0     8MB   │
+│ 9/26/2026, 2:50:57 PM  CI        50ms       4     0     7.8MB │
+│ 9/26/2026, 2:51:15 PM  CI        55ms       4     0     8MB   │
+│ 9/26/2026, 2:52:26 PM  CI        69ms       4     0     7.7MB │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-Calculations use GitHub's public [billing rates](https://docs.github.com/en/billing/managing-billing-for-github-actions/about-billing-for-github-actions):
-- **Linux:** $0.008 / minute
-- **macOS:** $0.08 / minute
-- **Windows:** $0.016 / minute
+(Real output; the run above had ten entries and the middle six are elided.)
 
 ---
 
-## Feature 14 — Run History Logger
+## The trend
 
-Every run is appended to `.aeroci-artifacts/history.jsonl` (newline-delimited JSON):
+With two or more runs of the same workflow, `aeroci run --profile` compares
+this run against your previous ones:
 
-```json
-{"timestamp":"2026-08-12T04:34:18.000Z","workflow":"CI","totalMs":4142,"passed":4,"failed":0,"peakMemMB":12}
-{"timestamp":"2026-08-12T04:36:22.000Z","workflow":"CI","totalMs":3891,"passed":4,"failed":0,"peakMemMB":11}
+```
+📊 Compared with your last 9 run(s)
+  This run                  : 69ms
+  Average before            : 51ms (median 50ms)
+  Change vs median          : 19ms (38%) slower
+  ▇▅▅▅▅▅▅▅▅  10 most recent runs
 ```
 
-View with: `aeroci profile`
+The word carries the direction and the number carries the size, so the line
+never says "19ms (-38%) slower". Both numbers are shown because they answer
+different questions: the median is what a typical run of this workflow costs,
+the average is what the last twelve cost together, and they diverge exactly
+when there is an outlier worth knowing about.
+
+The baseline is a **median**, not a mean, so one slow afternoon does not move
+it for good. The sparkline is the most recent runs at a glance — in the
+example, one tall bar at the end is the run in question.
+
+Only runs of the **same workflow** count. A slow `release` run never becomes
+the baseline for `CI`.
 
 ---
 
-## Feature 15 — Trend Analyzer
-
-When 2+ historical runs exist, the profiler compares the latest run to the average:
+## The observations
 
 ```
-📈 Performance Trend (vs last 5 runs)
-  • Average Duration: 4.02s
-  • This Run:         4.14s  (+3.0% slower)
-  • Trend:            ↗ Slightly slower
-
-  Sparkline: ▂▃▂▃▄▃▃▄  (last 8 runs)
+🔎 Worth knowing
+  ! every job is on one dependency chain (2 deep), so none of them overlap — if they do
+    not actually depend on each other's output, drop the `needs:`
+  · no job sets `timeout-minutes`, so a hung step waits for the 6-hour platform limit
+  Peak heap                 : 7.7MB (+0.1MB during the run)
 ```
+
+These are concrete facts about the workflow, not a score. A 0–100 number would
+hide which of them matters for your repository — a missing `timeout-minutes` is
+free to fix and worth more than a duplicate step you cannot delete because two
+teams own it.
+
+The set covers: a package install with no `actions/cache` step, a job with no
+`timeout-minutes`, steps that look like tests or checks with no `if:` guard, a
+job chain that serialises work that could overlap, and more.
 
 ---
 
-## Feature 16 — Parallelism Analyzer
+## What the profiler does not do
 
-Detects jobs that **could** run in parallel (no `needs:` dependency between them)
-but are currently sequential:
-
-```
-💡 Parallelism Opportunity
-  Jobs "lint" and "test" have no dependency relationship.
-  Consider running them in parallel to save ~45s.
-```
-
----
-
-## Feature 17 — Cache Hit Simulator
-
-Simulates `actions/cache` hit/miss logic using a local `.aeroci-artifacts/action-cache/index.json`:
-
-- **First run:** MISS — registers cache key for next run
-- **Subsequent runs:** HIT — simulates restored cache
-
-```
-✔ [actions/cache]: Cache HIT for key "node-modules-abc123"
-↩ Restored "node_modules" from local cache store
-```
-
----
-
-## Feature 18 — Network I/O Estimator
-
-Estimates the amount of data that would be downloaded during a real CI run,
-based on detected operations:
-
-| Operation | Estimated Size |
-|-----------|----------------|
-| `npm install` (no lock) | ~50 MB |
-| `npm ci` (with lock) | ~30 MB |
-| `pip install -r requirements.txt` | ~20 MB |
-| `actions/checkout` | ~5 MB |
-| Docker base image pull | ~100 MB |
-
----
-
-## Feature 19 — Memory Usage Tracker
-
-Tracks Node.js heap usage during the simulation:
-
-```
-  • Peak Memory Used: 14 MB
-```
-
-Reported in the run history for trend analysis.
-
----
-
-## Feature 20 — Pipeline Efficiency Score
-
-A 0–100 score evaluating your pipeline's configuration quality:
-
-```
-🏆 Pipeline Efficiency Score
-  • Score: 87/100 🟢 Excellent
-
-  Deductions:
-    -5: No job timeout-minutes set
-    -8: No caching step detected (npm install without cache)
-```
-
-| Score | Rating |
-|-------|--------|
-| 90–100 | 🟢 Excellent |
-| 75–89 | 🟡 Good |
-| 50–74 | 🟠 Needs Work |
-| 0–49 | 🔴 Poor |
-
-**Factors evaluated:**
-- Job timeout configuration
-- Caching strategy
-- Step count per job
-- Use of matrix builds
-- Secrets management
+- **It does not compare against a hosted run.** There is no baseline of what CI
+  "should" cost; every number here was measured on your machine.
+- **It does not estimate durations before you run.** The analyzer's old keyword
+  table (`npm install` → 60s) was removed: a number invented from a keyword is
+  a number that will be wrong, and being wrong about time is worse than saying
+  nothing.
+- **It does not know your cache state, registry latency or queue time.** Those
+  are the difference between your 69ms and GitHub's four minutes.

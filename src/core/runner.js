@@ -1,527 +1,365 @@
 /**
- * Ultra-Fast Sub-Millisecond GitHub Actions Engine Simulator v4.0.0
- * 50+ Enterprise Features:
- * 1. APFS clonefile() Isolated Sandbox  — true isolation, ~10ms setup
- * 2. Profiler                           — per-step timing, cost estimator, trend analysis
- * 3. Rich Reporter                      — JUnit XML, HTML, Markdown, JSON reports
- * 4. Action Simulator Library           — cache, setup-*, docker, AWS, github-script
- * 5. Matrix include/exclude support     — proper GitHub Actions semantics
+ * AeroCI run orchestrator.
+ *
+ * Responsibilities kept here (and only here):
+ *   • resolve which workflow files to run
+ *   • load `.aeroci.json` and the secret file
+ *   • drive the Engine
+ *   • feed the profiler / reporter
+ *   • decide the process exit code
+ *
+ * The process exit code is published through `process.exitCode` so that buffered
+ * stdout/stderr is always flushed — the previous implementation called
+ * `process.exit()` which truncated output and killed the reporter mid-write.
  */
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-const yaml = require('js-yaml');
-const { spawnSync } = require('child_process');
+
 const { Logger, colors } = require('../utils/logger');
+const { Engine, STATUS, FAILED_STATUSES } = require('./engine');
+const { loadConfig } = require('./config');
 const { Profiler } = require('./profiler');
 const { Reporter } = require('./reporter');
-const { Actions } = require('./actions');
+const { Debugger } = require('./debugger');
+const { VERSION } = require('../version');
 
-class GitHubActionsEngine {
-    constructor(sandboxDir, projectRoot) {
-        this.sandboxDir = sandboxDir;
-        this.projectRoot = projectRoot;
+/** Accepts a file, a directory, a project root, or glob-ish patterns. */
+function resolveWorkflowFiles(target, cwd, globs) {
+    const absolute = path.resolve(cwd, target);
 
-        this.envFile = path.join(sandboxDir, '.github_env');
-        this.pathFile = path.join(sandboxDir, '.github_path');
-        this.outputFile = path.join(sandboxDir, '.github_output');
+    if (fs.existsSync(absolute) && fs.statSync(absolute).isFile()) return [absolute];
 
-        fs.writeFileSync(this.envFile, '');
-        fs.writeFileSync(this.pathFile, '');
-        fs.writeFileSync(this.outputFile, '');
-
-        this.outputs = {};
-    }
-
-    evaluateExpressions(str, context = {}) {
-        if (!str || typeof str !== 'string') return str;
-
-        return str.replace(/\${{\s*([^}]+)\s*}}/g, (_, expr) => {
-            expr = expr.trim();
-
-            if (expr.startsWith('github.')) {
-                const key = expr.replace('github.', '');
-                return context.github ? (context.github[key] || '') : '';
+    if (fs.existsSync(absolute) && fs.statSync(absolute).isDirectory()) {
+        const direct = listWorkflowsIn(absolute);
+        if (direct.length) return direct;
+        // A project root: fall back to the conventional location.
+        for (const candidate of ['.github/workflows', '.github/workflows.disabled', '.gitea/workflows']) {
+            const nested = path.join(absolute, candidate);
+            if (fs.existsSync(nested)) {
+                const found = listWorkflowsIn(nested);
+                if (found.length) return found;
             }
-            if (expr.startsWith('matrix.')) {
-                const key = expr.replace('matrix.', '');
-                return context.matrix ? (context.matrix[key] || '') : '';
-            }
-            if (expr.startsWith('env.')) {
-                const key = expr.replace('env.', '');
-                return context.env ? (context.env[key] || '') : '';
-            }
-            if (expr.startsWith('secrets.')) {
-                const key = expr.replace('secrets.', '');
-                return context.secrets ? (context.secrets[key] || '') : '';
-            }
-            if (expr.startsWith('steps.')) {
-                const parts = expr.split('.');
-                const stepId = parts[1];
-                const outputKey = parts[3];
-                return (this.outputs[stepId] && this.outputs[stepId][outputKey]) || '';
-            }
-
-            return expr;
-        });
-    }
-
-    buildEnvironment(jobEnv = {}, stepEnv = {}, context = {}) {
-        const baseEnv = {
-            ...process.env,
-            CI: 'true',
-            GITHUB_ACTIONS: 'true',
-            GITHUB_WORKFLOW: context.workflowName || 'CI Simulator',
-            GITHUB_RUN_ID: '10001',
-            GITHUB_RUN_NUMBER: '1',
-            GITHUB_JOB: context.jobId || 'build',
-            GITHUB_ACTION: context.stepId || 'run',
-            GITHUB_ACTOR: process.env.USER || 'developer',
-            GITHUB_REPOSITORY: 'local/repository',
-            GITHUB_EVENT_NAME: context.eventName || 'push',
-            GITHUB_SHA: 'local-sha-000000',
-            GITHUB_REF: 'refs/heads/main',
-            GITHUB_REF_NAME: 'main',
-            GITHUB_WORKSPACE: this.sandboxDir,
-            RUNNER_OS: process.platform === 'darwin' ? 'macOS' : (process.platform === 'win32' ? 'Windows' : 'Linux'),
-            RUNNER_ARCH: process.arch === 'arm64' ? 'ARM64' : 'X64',
-            RUNNER_TEMP: path.join(this.sandboxDir, 'tmp'),
-            GITHUB_ENV: this.envFile,
-            GITHUB_PATH: this.pathFile,
-            GITHUB_OUTPUT: this.outputFile,
-            TMPDIR: this.sandboxDir
-        };
-
-        if (fs.existsSync(this.envFile)) {
-            const envContent = fs.readFileSync(this.envFile, 'utf8');
-            envContent.split('\n').forEach(line => {
-                const parts = line.split('=');
-                if (parts.length >= 2) {
-                    baseEnv[parts[0].trim()] = parts.slice(1).join('=').trim();
-                }
-            });
         }
-
-        return { ...baseEnv, ...jobEnv, ...stepEnv };
+        return [];
     }
 
-    parseWorkflowCommands(output) {
-        if (!output) return;
+    // Not on disk → treat as a glob relative to the cwd.
+    const matches = expandGlob(absolute);
+    if (matches.length) return matches;
 
-        output.split('\n').forEach(line => {
-            if (line.startsWith('::notice::')) {
-                Logger.info(`📢 ${colors.bright}${line.replace('::notice::', '')}${colors.reset}`);
-            } else if (line.startsWith('::warning::')) {
-                Logger.warn(`⚠️ ${line.replace('::warning::', '')}`);
-            } else if (line.startsWith('::error::')) {
-                Logger.error(`✖ ${line.replace('::error::', '')}`);
-            }
-        });
+    // Fall back to the configured globs.
+    return unique(globs.flatMap((g) => expandGlob(path.resolve(cwd, g))));
+}
+
+function listWorkflowsIn(dir) {
+    let entries = [];
+    try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+        return [];
     }
+    return entries
+        .filter((e) => e.isFile() && /\.ya?ml$/i.test(e.name))
+        .map((e) => path.join(dir, e.name))
+        .sort();
+}
 
-    parseGithubOutputs(stepId) {
-        if (stepId && fs.existsSync(this.outputFile)) {
-            const content = fs.readFileSync(this.outputFile, 'utf8');
-            if (!this.outputs[stepId]) this.outputs[stepId] = {};
-            content.split('\n').forEach(line => {
-                const parts = line.split('=');
-                if (parts.length >= 2) {
-                    this.outputs[stepId][parts[0].trim()] = parts.slice(1).join('=').trim();
-                }
-            });
-            fs.writeFileSync(this.outputFile, '');
-        }
+/** Tiny glob: supports ** and * and ? — enough for workflow globs. */
+function expandGlob(pattern) {
+    const normalised = pattern.replace(/\\/g, '/');
+    if (!/[*?]/.test(normalised)) return [];
+
+    const starIndex = normalised.search(/[*?]/);
+    const base = normalised.slice(0, starIndex).replace(/\/[^/]*$/, '');
+    const root = fs.existsSync(base) && fs.statSync(base).isDirectory() ? base : process.cwd();
+
+    const rx = new RegExp('^' + normalised
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*\//g, '\u0000')
+        .replace(/\*\*/g, '.*')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\?/g, '[^/]')
+        .replace(/\u0000/g, '(?:.*/)?') + '$');
+
+    const results = [];
+    walk(root, '', rx, results, 0);
+    return results.sort();
+}
+
+function walk(dir, prefix, rx, out, depth) {
+    if (depth > 8 || out.length > 500) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (_) { return; }
+    for (const entry of entries) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, rel, rx, out, depth + 1);
+        else if (rx.test(rel)) out.push(full);
     }
 }
 
+function unique(list) {
+    return [...new Set(list)];
+}
+
+/** The `runs-on:` of the first job, as a label for the cost projection. */
+function firstRunsOn(doc) {
+    for (const job of Object.values((doc && doc.jobs) || {})) {
+        const value = job && job['runs-on'];
+        if (typeof value === 'string') return value;
+        if (Array.isArray(value) && value.length) return value.join(',');
+    }
+    return null;
+}
+
 class Runner {
-    static run(workflowPath = null, options = {}) {
-        const totalTimerStart = process.hrtime();
-        const { onlyJob = null, report = false, envOverrides = {} } = options;
+    /**
+     * @param {string|null} target  workflow file / directory / glob
+     * @param {object} options
+     * @returns {Promise<number>} the process exit code
+     */
+    static async run(target = null, options = {}) {
+        const cwd = options.cwd || process.cwd();
+        const config = loadConfig(cwd);
 
-        let targetFiles = [];
+        for (const error of config.errors) Logger.warn(error);
 
-        if (workflowPath) {
-            const resolved = path.resolve(process.cwd(), workflowPath);
-            if (fs.existsSync(resolved)) {
-                if (fs.statSync(resolved).isDirectory()) {
-                    targetFiles = fs.readdirSync(resolved)
-                        .filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))
-                        .map(f => path.join(resolved, f));
-                } else {
-                    targetFiles = [resolved];
-                }
-            }
+        const files = resolveWorkflowFiles(target, cwd, config.workflowGlobs);
+        if (files.length === 0) {
+            Logger.error(`No workflow files found${target ? ` for "${target}"` : ''}.`);
+            Logger.note('  Point AeroCI at a file, a folder, or a glob:');
+            Logger.note('    aeroci run .github/workflows/ci.yml');
+            Logger.note('    aeroci run .github/workflows');
+            return 1;
         }
 
-        if (targetFiles.length === 0) {
-            const dir = path.resolve(process.cwd(), '.github/workflows');
-            if (fs.existsSync(dir)) {
-                targetFiles = fs.readdirSync(dir)
-                    .filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))
-                    .map(f => path.join(dir, f));
-            }
+        const envOverrides = {};
+        for (const [key, value] of Object.entries(options.envOverrides || {})) {
+            if (key && typeof value === 'string') envOverrides[key] = value;
         }
 
-        if (targetFiles.length === 0) {
-            Logger.error(`No workflow files found to run!`);
-            process.exit(0);
-        }
+        const engine = new Engine({
+            cwd,
+            config,
+            debug: !!options.debugOnFailure,
+            dryRun: !!options.dryRun,
+            onlyJob: options.onlyJob || null,
+            event: options.event || null,
+            envOverrides,
+            envFile: config.envFile,
+            inputs: options.inputs || {},
+            // Command-line --var wins over .aeroci.json, which wins over .env.
+            vars: { ...config.vars, ...(options.vars || {}) },
+            secrets: config.secrets,
+            shell: options.shell || config.runner.shell || null,
+            strictSecrets: config.strictSecrets,
+            stepTimeoutMinutes: options.stepTimeout || config.runner.timeoutMinutes || 10,
+            maxOutputLines: config.runner.maxOutputLines || 200,
+            keepSandbox: !!options.keepSandbox
+        });
 
-        // ── Ultra-Fast Isolated Sandbox ──────────────────────────────────────────
-        // Strategy:
-        //   • Files       → COPYFILE_FICLONE  (APFS clonefile = O(1) CoW, no data copy)
-        //   • Directories → fs.cpSync         (uses clonefile internally on macOS)
-        //   • node_modules→ symlink            (read-only deps, saves ~99% setup time)
-        //   • .git        → skipped           (not needed in CI)
-        // Result: true isolation (scripts write freely without touching real project)
-        // ─────────────────────────────────────────────────────────────────────────
-        const tempPrefix = path.join(os.tmpdir(), `aeroci-sandbox-${Date.now()}-`);
-        const sandboxDir = fs.mkdtempSync(tempPrefix);
-        const projectRoot = process.cwd();
-
-        const setupTimer = process.hrtime();
-        let clonedCount = 0;
-
+        let results;
         try {
-            const entries = fs.readdirSync(projectRoot);
-            for (const entry of entries) {
-                if (entry === '.git') continue;
-
-                const srcPath = path.join(projectRoot, entry);
-                const destPath = path.join(sandboxDir, entry);
-
-                // Heavy/Read-only directories: symlink for zero-copy 0.1ms speed
-                if (['node_modules', 'docs', '.aeroci-artifacts'].includes(entry)) {
-                    try { fs.symlinkSync(srcPath, destPath, 'dir'); } catch (_) {}
-                    clonedCount++;
-                    continue;
-                }
-
-                try {
-                    const stat = fs.lstatSync(srcPath);
-                    if (stat.isDirectory()) {
-                        // For source directories (.github, src, etc.), create lightweight directory & copy files via clonefile
-                        fs.mkdirSync(destPath, { recursive: true });
-                        const subEntries = fs.readdirSync(srcPath);
-                        for (const sub of subEntries) {
-                            const subSrc = path.join(srcPath, sub);
-                            const subDest = path.join(destPath, sub);
-                            try {
-                                const subStat = fs.lstatSync(subSrc);
-                                if (subStat.isDirectory()) {
-                                    fs.symlinkSync(subSrc, subDest, 'dir');
-                                } else {
-                                    fs.copyFileSync(subSrc, subDest, fs.constants.COPYFILE_FICLONE);
-                                }
-                            } catch (_) {
-                                try { fs.symlinkSync(subSrc, subDest); } catch (_2) {}
-                            }
-                        }
-                    } else {
-                        // COPYFILE_FICLONE: O(1) Copy-on-Write APFS clone
-                        fs.copyFileSync(srcPath, destPath, fs.constants.COPYFILE_FICLONE);
-                    }
-                    clonedCount++;
-                } catch (_) {
-                    try { fs.symlinkSync(srcPath, destPath); clonedCount++; } catch (_2) {}
-                }
-            }
-        } catch (_) {}
-
-        const setupNs = process.hrtime(setupTimer);
-        const setupDuration = (setupNs[0] * 1000 + setupNs[1] / 1e6).toFixed(2);
-        Logger.info(`⚡ Isolated Sandbox ready at: ${colors.gray}${sandboxDir}${colors.reset} (${colors.cyan}${setupDuration}ms${colors.reset} · ${clonedCount} items cloned · node_modules linked)`);
-
-        const cleanupSandbox = () => {
-            if (fs.existsSync(sandboxDir)) {
-                try {
-                    fs.rmSync(sandboxDir, { recursive: true, force: true });
-                    Logger.info(`🧹 Ephemeral Sandbox auto-cleaned. (Zero disk footprint)`);
-                } catch (e) {}
-            }
-        };
-
-        process.on('exit', cleanupSandbox);
-        process.on('SIGINT', () => { cleanupSandbox(); process.exit(130); });
-
-        const engine = new GitHubActionsEngine(sandboxDir, projectRoot);
-        let overallSuccess = true;
-
-        // Inject --env overrides into process.env for this run
-        for (const [k, v] of Object.entries(envOverrides)) {
-            process.env[k] = v;
+            results = await engine.run(files);
+        } catch (err) {
+            Logger.error(`AeroCI crashed: ${err.message}`);
+            if (options.debugOnFailure) console.error(err.stack);
+            return 1;
         }
 
-        for (const targetFile of targetFiles) {
-            const relPath = path.relative(projectRoot, targetFile);
-            Logger.info(`Initializing Sub-Millisecond Runner for: ${colors.bright}${colors.cyan}${relPath}${colors.reset}`);
+        return Runner.finalize(results, options, cwd);
+    }
 
-            const fileContent = fs.readFileSync(targetFile, 'utf8');
-            const parsedYaml = yaml.load(fileContent);
+    /** Profiling, reporting, the summary and the exit code. */
+    static finalize(results, options = {}, cwd = process.cwd()) {
+        let exitCode = 0;
+        let totalFailedSteps = 0;
+        const workflows = [];
 
-            const workflowName = parsedYaml.name || 'Unnamed Workflow';
-            const relPathShort = path.relative(projectRoot, targetFile);
-            Logger.metric('Pipeline Name', workflowName);
-            Logger.metric('Trigger Event', JSON.stringify(parsedYaml.on || 'manual'));
-            if (onlyJob) Logger.info(`🎯 Running only job: ${colors.yellow}${onlyJob}${colors.reset}`);
-            console.log(colors.gray + '--------------------------------------------------' + colors.reset);
+        // One directory for the whole run. Each workflow writes its own
+        // `<slug>.<ext>` files inside it, so running several workflows at once
+        // cannot make the last one overwrite the others.
+        const reportDir = options.reportDir || path.join(cwd, '.aeroci-artifacts', 'report');
 
-            const profiler = new Profiler(workflowName);
-            const reporter = new Reporter({ workflowName, workflowFile: relPathShort });
+        for (const result of results) {
+            const reporter = new Reporter({
+                workflowName: result.name,
+                workflowFile: result.relativeFile
+            });
+            const profiler = new Profiler(result.name);
             profiler.startMemoryTracking();
 
-            const jobs = parsedYaml.jobs || {};
-            let failedSteps = 0;
-            let jobAborted = false;
-
-            for (const [jobId, jobDetails] of Object.entries(jobs)) {
-                if (jobAborted) break;
-
-                let matrixInstances = [{}];
-                if (jobDetails.strategy && jobDetails.strategy.matrix) {
-                    const matrix = jobDetails.strategy.matrix;
-                    // Separate special directives from regular matrix keys
-                    const { include, exclude, ...regularMatrix } = matrix;
-                    const keys = Object.keys(regularMatrix);
-                    matrixInstances = [];
-
-                    // Build all combinations from regular matrix keys
-                    if (keys.length > 0) {
-                        const combinations = (index, current) => {
-                            if (index === keys.length) {
-                                matrixInstances.push({ ...current });
-                                return;
-                            }
-                            const key = keys[index];
-                            const values = Array.isArray(regularMatrix[key]) ? regularMatrix[key] : [regularMatrix[key]];
-                            values.forEach(val => {
-                                combinations(index + 1, { ...current, [key]: val });
-                            });
-                        };
-                        combinations(0, {});
-                    }
-
-                    // Handle 'include': merge into matching combos or add as new instances
-                    if (include && Array.isArray(include)) {
-                        if (matrixInstances.length === 0) {
-                            // No regular matrix — include items ARE the instances
-                            matrixInstances = include.map(item => ({ ...item }));
-                        } else {
-                            include.forEach(item => {
-                                const match = matrixInstances.find(combo =>
-                                    Object.entries(item).every(([k, v]) => combo[k] === undefined || combo[k] === v)
-                                );
-                                if (match) {
-                                    Object.assign(match, item);
-                                } else {
-                                    matrixInstances.push({ ...item });
-                                }
-                            });
-                        }
-                    }
-
-                    // Handle 'exclude': remove matching combinations
-                    if (exclude && Array.isArray(exclude)) {
-                        matrixInstances = matrixInstances.filter(combo =>
-                            !exclude.some(ex =>
-                                Object.entries(ex).every(([k, v]) => combo[k] === v)
-                            )
-                        );
-                    }
-
-                    if (matrixInstances.length === 0) matrixInstances = [{}];
-                }
-
-                for (const matrixCtx of matrixInstances) {
-                    const matrixLabel = Object.keys(matrixCtx).length > 0 
-                        ? ` (${Object.entries(matrixCtx).map(([k, v]) => `${k}:${typeof v === 'object' ? JSON.stringify(v) : v}`).join(', ')})` 
-                        : '';
-
-                    // --only-job filter
-                    if (onlyJob && jobId !== onlyJob) {
-                        console.log(`\n${colors.gray}⏭ Skipping Job: [${jobId}] (--only-job ${onlyJob})${colors.reset}`);
-                        continue;
-                    }
-
-                    profiler.startJob(jobId);
-                    console.log(`\n${colors.magenta}${colors.bright}▶ Executing Job: [${jobId}]${matrixLabel}${colors.reset} ${colors.gray}(runs-on: ${jobDetails['runs-on'] || 'ubuntu-latest'})${colors.reset}`);
-
-                    const steps = jobDetails.steps || [];
-
-                    for (let i = 0; i < steps.length; i++) {
-                        const step = steps[i];
-
-                        const evalContext = {
-                            workflowName,
-                            jobId,
-                            eventName: typeof parsedYaml.on === 'string' ? parsedYaml.on : Object.keys(parsedYaml.on || {})[0],
-                            matrix: matrixCtx,
-                            github: { sha: 'local-sha', ref: 'refs/heads/main', repository: 'local/repo', event_name: 'push' }
-                        };
-
-                        const stepName = engine.evaluateExpressions(
-                            step.name || step.run || (step.uses ? `action: ${step.uses}` : `Step ${i+1}`),
-                            evalContext
-                        );
-
-                        console.log(`\n  ${colors.cyan}${colors.bright}↳ Step ${i+1}/${steps.length}:${colors.reset} ${colors.bright}${stepName}${colors.reset}`);
-
-                        if (step.if) {
-                            const evaluatedIf = engine.evaluateExpressions(step.if, evalContext);
-                            if (evaluatedIf === 'false' || evaluatedIf === 'failure()') {
-                                Logger.info(`    ⏭️ Step skipped due to condition: if: ${step.if}`);
-                                continue;
-                            }
-                        }
-
-                        if (step.uses) {
-                            const evaluatedUses = engine.evaluateExpressions(step.uses, evalContext);
-                            Logger.info(`    ⚡ Simulating GitHub Action: ${colors.yellow}${evaluatedUses}${colors.reset}`);
-
-                            const stepStart = Date.now();
-
-                            // Try the rich action simulator first
-                            const simResult = Actions.simulate({ ...step, uses: evaluatedUses }, {
-                                cacheKeySuffix: JSON.stringify(matrixCtx),
-                                inputs: step.with || {}
-                            });
-
-                            if (simResult === null) {
-                                // Fallback: built-in handlers
-                                if (evaluatedUses.includes('actions/checkout')) {
-                                    Logger.success(`    ✔ [actions/checkout]: Isolated sandbox mounted (clonefile CoW).`);
-                                } else if (evaluatedUses.includes('actions/setup-node')) {
-                                    const rawVer = (step.with && step.with['node-version']) || process.version;
-                                    const nodeVer = engine.evaluateExpressions(String(rawVer), evalContext);
-                                    Logger.success(`    ✔ [actions/setup-node]: Node.js ${nodeVer} ready.`);
-                                } else {
-                                    Logger.success(`    ✔ GitHub Action [${evaluatedUses}] completed.`);
-                                }
-                            }
-
-                            const actionDur = Date.now() - stepStart;
-                            profiler.recordStep(jobId, stepName, actionDur, 0, { uses: evaluatedUses });
-                            reporter.recordStep({ jobId, stepName, durationMs: actionDur, exitCode: 0, uses: evaluatedUses });
-                            continue;
-                        }
-
-                        if (step.run) {
-                            let rawScript = engine.evaluateExpressions(step.run.trim(), evalContext);
-                            const stepEnv = engine.buildEnvironment(jobDetails.env || {}, step.env || {}, evalContext);
-
-                            // ⚡ Ultra-Fast Local Execution Optimization (50x Acceleration):
-                            // If running 'npm ci' or 'npm install' and node_modules already exists (symlinked from host),
-                            // skip re-downloading from remote npm registry to run in <1ms instead of 5000ms.
-                            if (/^\s*npm\s+(ci|install|i)\s*$/.test(rawScript) && fs.existsSync(path.join(sandboxDir, 'node_modules'))) {
-                                console.log(`    ${colors.gray}$${colors.reset} ${rawScript}`);
-                                Logger.success(`    ⚡ [Zero-Copy Speedup]: node_modules pre-linked from host (0.1ms · 50x FASTER⚡)`);
-                                const duration = 0;
-                                profiler.recordStep(jobId, stepName, duration, 0, { script: rawScript });
-                                reporter.recordStep({ jobId, stepName, durationMs: duration, exitCode: 0, script: rawScript });
-                                continue;
-                            }
-
-                            const displayLines = rawScript.split('\n');
-                            if (displayLines.length === 1) {
-                                console.log(`    ${colors.gray}$${colors.reset} ${displayLines[0]}`);
-                            } else {
-                                console.log(`    ${colors.gray}$ [Multi-line Script]${colors.reset}`);
-                                displayLines.forEach(line => console.log(`      ${colors.gray}|${colors.reset} ${line}`));
-                            }
-
-                            const startTime = Date.now();
-
-                            // Apply per-step timeout (default 10 min)
-                            const stepTimeout = (step['timeout-minutes'] || options.stepTimeout || 10) * 60 * 1000;
-
-                            const result = spawnSync(rawScript, {
-                                shell: true,
-                                cwd: sandboxDir,
-                                env: stepEnv,
-                                stdio: 'pipe',
-                                encoding: 'utf8',
-                                timeout: stepTimeout
-                            });
-
-                            const duration = Date.now() - startTime;
-
-                            if (result.stdout && result.stdout.trim()) {
-                                engine.parseWorkflowCommands(result.stdout.trim());
-                                result.stdout.trim().split('\n').forEach(l => {
-                                    if (!l.startsWith('::')) {
-                                        console.log(`      ${colors.cyan}|${colors.reset} ${l}`);
-                                    }
-                                });
-                            }
-
-                            engine.parseGithubOutputs(step.id);
-
-                            // Record to profiler & reporter
-                            const exitCode = result.status ?? (result.error ? 1 : 0);
-                            profiler.recordStep(jobId, stepName, duration, exitCode, { script: rawScript });
-                            reporter.recordStep({ jobId, stepName, durationMs: duration, exitCode, script: rawScript });
-
-                            if (exitCode !== 0) {
-                                if (result.error?.code === 'ETIMEDOUT') {
-                                    Logger.error(`Step timed out after ${step['timeout-minutes'] || options.stepTimeout || 10}min`);
-                                }
-                                if (result.stderr && result.stderr.trim()) {
-                                    result.stderr.trim().split('\n').forEach(l => console.log(`      ${colors.red}|${colors.reset} ${l}`));
-                                }
-                                Logger.error(`Command failed with exit code ${exitCode} (${duration}ms)`);
-                                failedSteps++;
-
-                                if (!step['continue-on-error']) {
-                                    Logger.error(`Job [${jobId}] aborted immediately due to step failure.`);
-                                    jobAborted = true;
-                                    overallSuccess = false;
-                                    break;
-                                }
-                            } else {
-                                Logger.success(`    ✔ Completed in ${duration}ms`);
-                            }
-                        }
+            let declaredSteps = 0;
+            const stepCountByJob = new Map();
+            try {
+                const loaded = Engine.loadWorkflowFile(result.file);
+                if (loaded.doc) {
+                    for (const [id, job] of Object.entries(loaded.doc.jobs || {})) {
+                        const count = (job && Array.isArray(job.steps) ? job.steps.length : 0);
+                        stepCountByJob.set(id, count);
+                        declaredSteps += count;
                     }
                 }
+            } catch (_) { /* already reported by the engine */ }
+
+            // A step inside a matrix job runs once per combination, so the
+            // expected count has to be multiplied out. Otherwise the ratio
+            // reports more than 100% and means nothing.
+            const expectedSteps = result.jobs.reduce((sum, job) => {
+                const instances = Array.isArray(job.matrixInstances) && job.matrixInstances.length
+                    ? job.matrixInstances.length
+                    : 1;
+                return sum + (stepCountByJob.get(job.jobId) || 0) * instances;
+            }, 0);
+
+            let executedSteps = 0;
+            for (const step of result.steps) {
+                const stepOk = !FAILED_STATUSES.has(step.status);
+                if (step.status !== STATUS.SKIPPED && step.status !== STATUS.CANCELLED) executedSteps++;
+                if (!stepOk) totalFailedSteps++;
+
+                reporter.recordStep({
+                    jobId: step.jobId,
+                    stepName: step.name,
+                    stepId: step.id,
+                    status: step.status,
+                    durationMs: step.durationMs,
+                    exitCode: step.exitCode,
+                    script: step.script,
+                    uses: step.uses,
+                    outputs: step.outputs,
+                    warnings: step.warnings,
+                    errors: step.errors,
+                    notSimulated: step.notSimulated,
+                    log: step.log
+                });
+                profiler.recordStep(step.jobId, step.name, step.durationMs,
+                    step.exitCode ?? (stepOk ? 0 : 1), { status: step.status });
             }
 
             profiler.stopMemoryTracking();
             profiler.saveToHistory();
 
-            console.log(colors.gray + '\n--------------------------------------------------' + colors.reset);
-            const totalDuration = (process.hrtime(totalTimerStart)[0] * 1000 + process.hrtime(totalTimerStart)[1] / 1e6).toFixed(2);
+            const failed = result.status === STATUS.FAILURE;
+            if (failed) exitCode = 1;
 
-            // Coverage
-            const totalStepsInWorkflow = Object.values(jobs).reduce((s, j) => s + (j.steps || []).length, 0);
-            Reporter.computeCoverage(totalStepsInWorkflow, profiler.runs.length);
+            const matrixCombinations = result.jobs.reduce((sum, job) => {
+                if (!job.strategy) return sum;
+                return sum + (Array.isArray(job.matrixInstances) ? job.matrixInstances.length : 1);
+            }, 0);
 
-            // Profiler report
-            profiler.printFullReport(jobs);
+            console.log(colors.gray + '─'.repeat(64) + colors.reset);
+            Runner._printSummary(result, { declaredSteps, expectedSteps, executedSteps });
+            Reporter.printCoverage({
+                expected: expectedSteps,
+                executed: executedSteps,
+                declared: declaredSteps,
+                skipped: result.steps.filter((s) => s.status === STATUS.SKIPPED
+                    || s.status === STATUS.CANCELLED),
+                combinations: matrixCombinations,
+                notSimulated: result.steps.filter((s) => s.notSimulated).length
+            });
 
-            if (failedSteps === 0) {
-                Logger.success(`Workflow [${relPath}] simulated successfully in ${colors.bright}${totalDuration}ms${colors.reset}! 🚀`);
-            } else {
-                reporter.printReproducers();
-                Logger.error(`Workflow [${relPath}] stopped with ${failedSteps} failed step(s).`);
-                if (report) reporter.generateAll();
-                cleanupSandbox();
-                process.exit(1);
+            if (options.profile) {
+                let doc = {};
+                try {
+                    doc = (Engine.loadWorkflowFile(result.file).doc) || {};
+                } catch (_) { /* the engine already reported a bad file */ }
+                const runnerLabel = firstRunsOn(doc) || 'ubuntu-latest';
+                console.log(colors.gray + '─'.repeat(64) + colors.reset);
+                profiler.printAll({ doc, runner: runnerLabel });
             }
 
-            // Generate reports if --report flag passed
-            if (report) {
-                reporter.generateAll();
-                reporter.emitAnnotations();
+            if (options.report) {
+                const formats = options.reportFormats || ['json', 'markdown', 'html', 'junit'];
+                reporter.generateAll({ formats, dir: reportDir });
+            }
+            if (options.annotations) reporter.emitAnnotations();
+            if (options.reproducers !== false) reporter.printReproducers();
+
+            workflows.push({
+                name: result.name,
+                file: result.relativeFile,
+                status: result.status,
+                durationMs: result.durationMs,
+                notSimulated: result.steps.filter((s) => s.notSimulated).length,
+                jobs: result.jobs.map((j) => ({
+                    id: j.jobId,
+                    status: j.status,
+                    durationMs: j.durationMs,
+                    steps: (j.steps || []).length
+                })),
+                event: result.eventName,
+                slug: reporter.slug,
+                // Where the step-level detail for this workflow lives, relative
+                // to the index file itself, so the directory can be moved or
+                // zipped and the reference still resolves.
+                detail: options.report ? `${reporter.slug}.json` : null
+            });
+        }
+
+        // The run summary. It is a different thing from the per-workflow reports
+        // and lives beside them under its own name, so neither can clobber the
+        // other: `index.json` is the run, `<slug>.json` is one workflow.
+        if (options.json || options.report) {
+            const out = path.resolve(cwd, options.jsonPath
+                || path.join('.aeroci-artifacts', 'report', 'index.json'));
+            fs.mkdirSync(path.dirname(out), { recursive: true });
+            fs.writeFileSync(out, `${JSON.stringify({
+                generator: `AeroCI ${VERSION}`,
+                generatedAt: new Date().toISOString(),
+                event: results.length === 1 ? results[0].eventName : null,
+                exitCode,
+                workflows
+            }, null, 2)}\n`, 'utf8');
+            if (options.json) {
+                Logger.info(`Run summary → ${colors.cyan(path.relative(cwd, out) || out)}`);
             }
         }
 
-        cleanupSandbox();
-        if (overallSuccess) {
-            process.exit(0);
+        if (exitCode !== 0) {
+            Logger.error(`${totalFailedSteps} step(s) failed across ${results.length} workflow(s).`);
+            if (options.debugOnFailure) {
+                const firstFailure = results.flatMap((r) => r.steps).find((s) => FAILED_STATUSES.has(s.status));
+                if (firstFailure) Debugger.start({ step: firstFailure, results });
+            }
+        } else {
+            const unverified = results.reduce((n, r) => n + r.steps.filter((s) => s.notSimulated).length, 0);
+            if (unverified) {
+                Logger.warn(`All ${results.length} workflow(s) passed, but ${unverified} step(s) were not`
+                    + ` simulated — those are unverified.`);
+            } else {
+                Logger.success(`All ${results.length} workflow(s) passed.`);
+            }
+        }
+
+        return exitCode;
+    }
+
+    static _printSummary(result, { declaredSteps, expectedSteps, executedSteps }) {
+        const failedJobs = result.jobs.filter((j) => FAILED_STATUSES.has(j.status));
+        const skippedJobs = result.jobs.filter((j) => j.status === STATUS.SKIPPED);
+        const notSimulated = result.steps.filter((s) => s.notSimulated).length;
+        const expanded = expectedSteps > declaredSteps;
+
+        Logger.metric('Result', result.status === STATUS.SUCCESS
+            ? colors.green('success') : colors.red('failure'));
+        Logger.metric('Jobs', `${result.jobs.length} total · ${failedJobs.length} failed · ${skippedJobs.length} skipped`);
+        if (expectedSteps) {
+            Logger.metric('Steps', `${executedSteps}/${expectedSteps} executed`
+                + (expanded ? colors.gray(` (${declaredSteps} declared, matrix expanded)`) : ''));
+        }
+        Logger.metric('Duration', `${(result.durationMs / 1000).toFixed(2)}s`);
+        if (notSimulated) {
+            Logger.metric('Not simulated', colors.yellow(`${notSimulated} step(s) — see the warnings above`));
+        }
+        if (result.secretsMissing && result.secretsMissing.length) {
+            Logger.metric('Missing secrets', colors.yellow(result.secretsMissing.join(', ')));
         }
     }
 }
 
-module.exports = { Runner, GitHubActionsEngine };
+module.exports = { Runner, resolveWorkflowFiles, expandGlob };

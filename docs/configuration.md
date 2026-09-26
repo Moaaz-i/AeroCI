@@ -1,127 +1,160 @@
-# Configuration Reference — `.aeroci.json`
+# Configuration — `.aeroci.json`
 
-AeroCI is configured via a `.aeroci.json` file in your project root.
-Run `aeroci init` to generate the default configuration.
+Every field is optional. With no file at all, AeroCI uses the defaults below —
+`aeroci run` works in a project that has never heard of AeroCI.
 
----
-
-## Full Schema
+Run `aeroci init` to write one.
 
 ```json
 {
-  "$schema": "https://aeroci.dev/schema.json",
-  "version": "2.0.0",
-
+  "version": 1,
+  "workflows": [".github/workflows/*.yml", ".github/workflows/*.yaml"],
+  "envFile": ".env",
+  "strictSecrets": true,
+  "vars": {},
+  "secrets": {},
   "runner": {
-    "defaultImage": "ubuntu-latest",
-    "isolation": "ephemeral-node",
-    "timeout": 300
+    "shell": null,
+    "timeoutMinutes": 10,
+    "maxOutputLines": 200
   },
-
-  "environment": {
-    "envFile": ".env",
-    "strictSecrets": true
-  },
-
-  "reporting": {
-    "outputDir": "./aeroci-reports",
-    "formats": ["html", "json", "junit", "markdown"]
-  },
-
-  "security": {
-    "enabled": true,
-    "failOnCritical": true,
-    "failOnHigh": false
-  },
-
-  "profiler": {
-    "enabled": true,
-    "historyLimit": 50
+  "sandbox": {
+    "mode": "copy",
+    "exclude": [".git", "node_modules", "..."],
+    "keep": false
   }
 }
 ```
 
 ---
 
-## Fields
+## Top level
 
-### `runner`
+| Field | Type | Default | What it does |
+|-------|------|---------|--------------|
+| `version` | number | `1` | Schema version. |
+| `workflows` | string[] | `.github/workflows/*.yml`, `*.yaml` | Globs `aeroci run` scans when you give it no target. |
+| `envFile` | string | `".env"` | Where secrets come from, relative to the project root. |
+| `strictSecrets` | boolean | `true` | Report a workflow that references a secret your `.env` does not define. |
+| `vars` | object | `{}` | Values for the `vars` context. Merged under `--var`. |
+| `secrets` | object | `{}` | Values for the `secrets` context. Merged over `.env`, so a config value wins. |
 
-Controls how the pipeline simulation sandbox behaves.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `defaultImage` | string | `"ubuntu-latest"` | Simulated runner image label |
-| `isolation` | string | `"ephemeral-node"` | Isolation strategy (`ephemeral-node` = clonefile sandbox) |
-| `timeout` | number | `300` | Global pipeline timeout in seconds |
-
----
-
-### `environment`
-
-Controls how environment variables and secrets are loaded.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `envFile` | string | `".env"` | Path to local env file (relative to project root) |
-| `strictSecrets` | boolean | `true` | Fail `aeroci check` if secrets referenced in workflow are missing from `.env` |
-
-#### `.env` file example
-```
-GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxx
-NPM_TOKEN=npm_xxxxxxxxxxxxxxxxxxxxx
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-```
-
-> **Note:** AeroCI never uploads or logs your `.env` file. It stays local.
-
----
-
-### `reporting`
-
-Controls output file locations and enabled report formats.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `outputDir` | string | `"."` | Directory where report files are written |
-| `formats` | array | `["html","json","junit","markdown"]` | Which report formats to generate |
-
-Available format values: `html`, `json`, `junit`, `markdown`.
-
----
-
-### `security`
-
-Controls the security hardening engine behavior.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Enable/disable security audit |
-| `failOnCritical` | boolean | `true` | Exit with code 1 on CRITICAL findings |
-| `failOnHigh` | boolean | `false` | Exit with code 1 on HIGH findings |
-
----
-
-### `profiler`
-
-Controls run history storage.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Record each run to history |
-| `historyLimit` | number | `50` | Maximum number of runs to keep in `.aeroci-artifacts/history.jsonl` |
-
----
-
-## Minimal Configuration
-
-You can run AeroCI with zero configuration — just a `.aeroci.json` with:
+`vars` and `secrets` are a local convenience for a value you do not want in a
+file. Both are held in memory for the run; neither is written anywhere.
 
 ```json
 {
-  "version": "2.0.0"
+  "vars": { "REGION": "eu-west-1" },
+  "secrets": { "NPM_TOKEN": "…" }
 }
 ```
 
-All other values will use their defaults.
+A workflow then reads them the way it always does:
+
+```yaml
+- run: deploy --region "${{ vars.REGION }}"
+  env:
+    NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+An invalid file is reported, not thrown: a malformed `.aeroci.json` prints a
+warning naming the problem and the run continues on defaults, because a typo in
+a config file should not be the reason you cannot test a workflow.
+
+---
+
+## `runner`
+
+| Field | Type | Default | What it does |
+|-------|------|---------|--------------|
+| `shell` | string \| null | `null` | Override the shell for every `run:` step. `null` uses GitHub's default: `bash` on macOS and Linux. |
+| `timeoutMinutes` | number | `10` | Per-step timeout, overridden per job by `timeout-minutes:` or per step by `timeout-minutes:`. |
+| `maxOutputLines` | number | `200` | Log lines kept per step. |
+
+A step that exceeds `timeoutMinutes` has its whole process tree killed, not
+just the shell, so a backgrounded server does not survive to hold the port
+open. The step is reported as `timed_out`.
+
+`maxOutputLines` bounds what is *kept*. AeroCI does not stop reading the
+stream, so a chatty step still runs to completion — it is the record that is
+truncated, and the report says where it cut off.
+
+---
+
+## `sandbox`
+
+Controls the isolated copy each job runs in. See
+[sandbox.md](./sandbox.md) for the full explanation and the measured cost.
+
+| Field | Type | Default | What it does |
+|-------|------|---------|--------------|
+| `mode` | `"copy"` \| `"link"` | `"copy"` | `"copy"` leaves the excluded paths out. `"link"` symlinks them to your real ones. |
+| `exclude` | string[] | see below | Path names to leave out, at any depth. |
+| `keep` | boolean | `false` | Keep the sandbox after the run. |
+
+### `mode`
+
+`"link"` is for using your installed `node_modules` without an install step.
+It is **not** a speed option — both modes skip those paths, so they cost the
+same to set up. What it changes is visibility: a step that writes into a linked
+path edits the real files. AeroCI prints a warning naming every linked path
+before anything runs, and `--keep`-style leftovers are easy to find.
+
+```json
+{ "sandbox": { "mode": "link" } }
+```
+
+### `exclude`
+
+The defaults:
+
+```
+.git  node_modules  .aeroci-artifacts  .next  dist  build
+target  vendor  .venv  __pycache__  coverage  .env
+```
+
+Each name is matched at any depth, so `dist` also excludes
+`packages/web/dist`.
+
+Your `exclude` entries are **added to** these, not substituted for them. That
+is deliberate: a config that replaced the list would let
+`"exclude": ["vendor"]` quietly re-include `node_modules`, and the sandbox
+would then be a very expensive copy of your dependency tree.
+
+If a workflow genuinely needs one of these paths, `mode: "link"` puts it back
+and says so at the start of the run.
+
+---
+
+## What is not configurable
+
+Not every knob is worth having, and a few plausible ones were left out on
+purpose:
+
+- **`followSymlinks`** — a symlink in your project is recreated as a symlink
+  and never followed. Following one could duplicate its target, recurse on a
+  link pointing at a parent, or hand a step a way out of the sandbox to edit
+  your real files. There is no option to change this.
+- **A container runtime** — `services:` and `docker` actions are reported as
+  `not simulated`. AeroCI does not pretend to have Docker.
+- **A default shell per OS** — `shell: null` means "what GitHub would use
+  here", not a hard-coded `bash`.
+
+---
+
+## A note on `.env`
+
+`envFile` is read for the `secrets` context only, and the file itself is
+excluded from the sandbox — a runner has no `.env` in the working tree. Values
+are registered as log masks, so a value a step prints is shown as `***`.
+
+```bash
+# .env
+GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+NPM_TOKEN=npm_xxxxxxxxxxxxx
+AWS_ACCESS_KEY_ID=AKIA...
+```
+
+AeroCI reads this file and passes the values to the steps you asked for. It
+does not upload or log it. If you set `AERO_UNMASK_SECRETS=1`, log masking is
+off and nothing you run is safe to paste into an issue.

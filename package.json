@@ -1,8 +1,8 @@
 {
   "name": "aeroci",
-  "version": "2.0.2",
-  "description": "AeroCI: Local Digital Twin & CI Pipeline Simulator for GitHub Actions",
-  "main": "src/cli.js",
+  "version": "2.1.0",
+  "description": "AeroCI: a local GitHub Actions twin — run, analyse and secure workflows before you push",
+  "main": "src/core/runner.js",
   "bin": {
     "aeroci": "bin/aeroci.js"
   },
@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "start": "node bin/aeroci.js",
-    "test": "node tests/runner.test.js",
+    "test": "node tests/index.js",
+    "lint": "node scripts/lint.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
@@ -25,8 +26,9 @@
     "github-actions",
     "simulator",
     "digital-twin",
-    "aeroci-detection",
-    "devops"
+    "local-ci",
+    "devops",
+    "actions-runner"
   ],
   "author": "Moaaz",
   "license": "MIT",
@@ -38,11 +40,12 @@
   "bugs": {
     "url": "https://github.com/Moaaz-i/AeroCI/issues"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "chalk": "^4.1.2",
     "commander": "^12.1.0",
     "js-yaml": "^4.1.0",
-    "ora": "^5.4.1",
     "velociradix": "^6.2.1"
   },
   "devDependencies": {

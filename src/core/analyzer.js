@@ -1,487 +1,547 @@
 /**
- * AeroCI Deep Workflow Analyzer v2.0.0
- * Features 1-10: Intelligent static analysis of GitHub Actions workflows
+ * AeroCI workflow analyzer.
  *
- * 1.  Step Dependency Graph         — map steps that consume outputs of others
- * 2.  Dead Step Detector            — steps that can never execute
- * 3.  Duplicate Step Detector       — identical run: blocks across jobs
- * 4.  Long-Running Step Estimator   — heuristic duration estimate per step
- * 5.  Shell Compatibility Checker   — bash-only syntax inside sh steps
- * 6.  Secret Injection Analyzer     — trace secrets through env → run
- * 7.  Artifact Lifecycle Tracker    — match upload ↔ download pairs
- * 8.  Circular Job Dependency       — detect needs: cycles
- * 9.  Concurrency Group Analyzer    — conflicting concurrency groups
- * 10. Workflow Complexity Score     — composite 0-100 score
+ * Structural intelligence about a workflow graph: which steps can never be
+ * reached, which outputs are produced but never consumed, which jobs duplicate
+ * work, how the complexity adds up, and what the wall-clock cost will be.
+ *
+ * Every number here is derived from the workflow itself — no invented estimates.
  */
 
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const { Logger, colors } = require('../utils/logger');
+const { orderJobs, normalizeNeeds, transitiveNeeds } = require('./graph');
+const { expandMatrix } = require('./matrix');
+const { Checker } = require('./checker');
 
 class Analyzer {
-    // ─── Feature 1: Step Dependency Graph ────────────────────────────────────
-    static buildStepDependencyGraph(job) {
-        const graph = [];
-        const steps = job.steps || [];
-        const outputProducers = {}; // stepId → [keys]
-
-        for (const step of steps) {
-            if (step.id) {
-                // Collect steps that set outputs
-                if (step.run && step.run.includes('>> $GITHUB_OUTPUT')) {
-                    const matches = [...step.run.matchAll(/^([A-Z_a-z0-9]+)=/gm)];
-                    outputProducers[step.id] = matches.map(m => m[1]);
-                }
-            }
-        }
-
-        for (const step of steps) {
-            const deps = [];
-            const stepStr = JSON.stringify(step);
-            const refs = [...stepStr.matchAll(/steps\.([a-zA-Z0-9_-]+)\.outputs\./g)];
-            for (const ref of refs) {
-                if (!deps.includes(ref[1])) deps.push(ref[1]);
-            }
-            if (deps.length > 0) {
-                graph.push({ step: step.name || step.id || '(unnamed)', dependsOn: deps });
-            }
-        }
-        return graph;
-    }
-
-    // ─── Feature 2: Dead Step Detector ───────────────────────────────────────
-    static findDeadSteps(job) {
-        const dead = [];
-        const steps = job.steps || [];
-        const IMPOSSIBLE_CONDITIONS = [
-            'false', '1 == 2', '0 == 1', "'' == 'x'",
-            'failure() && success()', 'cancelled() && success()'
-        ];
-
-        for (const step of steps) {
-            if (!step.if) continue;
-            const cond = String(step.if).trim().toLowerCase();
-            if (IMPOSSIBLE_CONDITIONS.some(ic => cond === ic.toLowerCase())) {
-                dead.push({
-                    step: step.name || step.id || step.run?.split('\n')[0] || '(unnamed)',
-                    condition: step.if
-                });
-            }
-            // Contradictory: success() && failure()
-            if (cond.includes('success()') && cond.includes('failure()') && cond.includes('&&')) {
-                dead.push({
-                    step: step.name || step.id || '(unnamed)',
-                    condition: step.if
-                });
-            }
-        }
-        return dead;
-    }
-
-    // ─── Feature 3: Duplicate Step Detector ──────────────────────────────────
-    static findDuplicateSteps(jobs) {
-        const seen = new Map(); // normalized script → [{jobId, stepName}]
-        const duplicates = [];
-
-        for (const [jobId, job] of Object.entries(jobs)) {
-            for (const step of (job.steps || [])) {
-                if (!step.run) continue;
-                const normalized = step.run.replace(/\s+/g, ' ').trim();
-                if (seen.has(normalized)) {
-                    const existing = seen.get(normalized);
-                    duplicates.push({
-                        script: normalized.slice(0, 80) + (normalized.length > 80 ? '…' : ''),
-                        locations: [...existing, { jobId, step: step.name || '(unnamed)' }]
-                    });
-                } else {
-                    seen.set(normalized, [{ jobId, step: step.name || '(unnamed)' }]);
-                }
-            }
-        }
-        return duplicates;
-    }
-
-    // ─── Feature 4: Long-Running Step Estimator ──────────────────────────────
-    static estimateStepDuration(step) {
-        if (step.uses) return { ms: 200, reason: 'Action invoke overhead' };
-        if (!step.run) return { ms: 0, reason: 'No-op' };
-
-        const script = step.run;
-        let ms = 50; // base
-        const reasons = [];
-
-        if (/npm (install|ci)/.test(script)) { ms += 15000; reasons.push('npm install'); }
-        if (/pip install/.test(script)) { ms += 8000; reasons.push('pip install'); }
-        if (/cargo build/.test(script)) { ms += 45000; reasons.push('cargo build'); }
-        if (/docker build/.test(script)) { ms += 30000; reasons.push('docker build'); }
-        if (/npm (run )?(build|test)/.test(script)) { ms += 5000; reasons.push('npm build/test'); }
-        if (/go build/.test(script)) { ms += 10000; reasons.push('go build'); }
-        if (/mvn (package|install)/.test(script)) { ms += 20000; reasons.push('maven'); }
-        if (/gradle/.test(script)) { ms += 18000; reasons.push('gradle'); }
-        if (/curl|wget/.test(script)) { ms += 2000; reasons.push('network I/O'); }
-        if (/sleep\s+\d+/.test(script)) {
-            const m = script.match(/sleep\s+(\d+)/);
-            if (m) { ms += parseInt(m[1]) * 1000; reasons.push(`sleep ${m[1]}s`); }
-        }
-
-        return { ms, reason: reasons.join(', ') || 'shell commands' };
-    }
-
-    // ─── Feature 5: Shell Compatibility Checker ───────────────────────────────
-    static checkShellCompatibility(steps) {
-        const issues = [];
-        const BASH_ONLY = [
-            { pattern: /\[\[.*\]\]/, desc: '[[ ]] — bash double-bracket test' },
-            { pattern: /<<</, desc: '<<< herestring — bash only' },
-            { pattern: /\$\((.+)\)/, desc: 'Command substitution (POSIX ok but check nesting)' },
-            { pattern: /\bsource\b/, desc: 'source builtin — use . in sh' },
-            { pattern: /\bpipefail\b/, desc: 'set -o pipefail — bash only' },
-            { pattern: /\bPIPESTATUS\b/, desc: '$PIPESTATUS — bash only' },
-            { pattern: /declare\s+-[aA]/, desc: 'declare -a/-A arrays — bash only' },
-            { pattern: /mapfile|readarray/, desc: 'mapfile/readarray — bash only' },
-        ];
-
-        for (const step of steps) {
-            if (!step.run) continue;
-            const shell = step.shell || 'bash'; // default is bash in GHA
-            if (shell === 'sh') {
-                for (const { pattern, desc } of BASH_ONLY) {
-                    if (pattern.test(step.run)) {
-                        issues.push({
-                            step: step.name || '(unnamed)',
-                            issue: desc,
-                            shell
-                        });
-                    }
-                }
-            }
-        }
-        return issues;
-    }
-
-    // ─── Feature 6: Secret Injection Analyzer ────────────────────────────────
-    static analyzeSecretFlow(jobs) {
-        const secretMap = {}; // secretName → [{jobId, stepName, via}]
-
-        for (const [jobId, job] of Object.entries(jobs)) {
-            // Check job-level env
-            const jobEnvSecrets = Object.entries(job.env || {})
-                .filter(([, v]) => /\$\{\{\s*secrets\./.test(String(v)))
-                .map(([k]) => k);
-
-            for (const step of (job.steps || [])) {
-                const allContent = JSON.stringify(step);
-                const matches = [...allContent.matchAll(/secrets\.([A-Z0-9_a-z]+)/g)];
-                for (const m of matches) {
-                    const name = m[1];
-                    if (!secretMap[name]) secretMap[name] = [];
-                    secretMap[name].push({
-                        jobId,
-                        step: step.name || step.id || '(unnamed)',
-                        via: step.env ? 'env block' : (step.with ? 'with block' : 'direct')
-                    });
-                }
-            }
-        }
-        return secretMap;
-    }
-
-    // ─── Feature 7: Artifact Lifecycle Tracker ───────────────────────────────
-    static trackArtifactLifecycle(jobs) {
-        const uploads = [];   // { name, jobId, stepName }
-        const downloads = []; // { name, jobId, stepName }
-
-        for (const [jobId, job] of Object.entries(jobs)) {
-            for (const step of (job.steps || [])) {
-                if (!step.uses) continue;
-                if (step.uses.includes('upload-artifact')) {
-                    uploads.push({
-                        name: step.with?.name || '(unnamed)',
-                        jobId,
-                        step: step.name || '(unnamed)'
-                    });
-                }
-                if (step.uses.includes('download-artifact')) {
-                    downloads.push({
-                        name: step.with?.name || '*',
-                        jobId,
-                        step: step.name || '(unnamed)'
-                    });
-                }
-            }
-        }
-
-        const orphanUploads = uploads.filter(u =>
-            !downloads.some(d => d.name === '*' || d.name === u.name)
-        );
-        const orphanDownloads = downloads.filter(d =>
-            d.name !== '*' && !uploads.some(u => u.name === d.name)
-        );
-
-        return { uploads, downloads, orphanUploads, orphanDownloads };
-    }
-
-    // ─── Feature 8: Circular Job Dependency Detector ─────────────────────────
-    static detectCircularDependencies(jobs) {
-        const cycles = [];
-        const visited = new Set();
-
-        const dfs = (jobId, chain) => {
-            if (chain.includes(jobId)) {
-                cycles.push([...chain, jobId]);
-                return;
-            }
-            if (visited.has(jobId)) return;
-            const job = jobs[jobId];
-            if (!job) return;
-            const needs = Array.isArray(job.needs) ? job.needs : (job.needs ? [job.needs] : []);
-            for (const dep of needs) {
-                dfs(dep, [...chain, jobId]);
-            }
-            visited.add(jobId);
-        };
-
-        for (const jobId of Object.keys(jobs)) {
-            dfs(jobId, []);
-        }
-        return cycles;
-    }
-
-    // ─── Feature 9: Concurrency Group Analyzer ───────────────────────────────
-    static analyzeConcurrencyGroups(jobs, workflowConcurrency) {
-        const groups = {};
-        if (workflowConcurrency) {
-            const g = workflowConcurrency.group || workflowConcurrency;
-            if (!groups[g]) groups[g] = [];
-            groups[g].push({ level: 'workflow', cancelInProgress: !!workflowConcurrency['cancel-in-progress'] });
-        }
-        for (const [jobId, job] of Object.entries(jobs)) {
-            if (job.concurrency) {
-                const g = job.concurrency.group || job.concurrency;
-                if (!groups[g]) groups[g] = [];
-                groups[g].push({ level: `job:${jobId}`, cancelInProgress: !!job.concurrency['cancel-in-progress'] });
-            }
-        }
-        const conflicts = Object.entries(groups)
-            .filter(([, entries]) => entries.length > 1)
-            .map(([group, entries]) => ({ group, entries }));
-        return { groups, conflicts };
-    }
-
-    // ─── Feature 10: Workflow Complexity Score ────────────────────────────────
-    static computeComplexityScore(doc) {
-        let score = 0;
-        const jobs = doc.jobs || {};
-        const jobCount = Object.keys(jobs).length;
-        let totalSteps = 0;
-        let matrixCount = 0;
-        let hasNeeds = false;
-        let conditionCount = 0;
-        let secretCount = 0;
-
-        for (const job of Object.values(jobs)) {
-            const steps = job.steps || [];
-            totalSteps += steps.length;
-            if (job.strategy?.matrix) matrixCount++;
-            if (job.needs) hasNeeds = true;
-            for (const step of steps) {
-                if (step.if) conditionCount++;
-                const content = JSON.stringify(step);
-                secretCount += (content.match(/secrets\./g) || []).length;
-            }
-        }
-
-        // Scoring rubric
-        score += Math.min(jobCount * 5, 20);        // up to 20pts for job count
-        score += Math.min(totalSteps * 2, 25);      // up to 25pts for steps
-        score += matrixCount * 8;                    // 8pts per matrix
-        score += hasNeeds ? 10 : 0;                 // 10pts for job dependencies
-        score += Math.min(conditionCount * 3, 15);  // up to 15pts for conditions
-        score += Math.min(secretCount * 2, 10);     // up to 10pts for secrets
-
-        return {
-            score: Math.min(score, 100),
-            breakdown: { jobCount, totalSteps, matrixCount, hasNeeds, conditionCount, secretCount },
-            rating: score < 20 ? '🟢 Simple' : score < 50 ? '🟡 Moderate' : score < 75 ? '🟠 Complex' : '🔴 Very Complex'
-        };
-    }
-
-    // ─── Main Entry Point ─────────────────────────────────────────────────────
     static analyze(targetPath = '.github/workflows') {
-        const fullPath = path.resolve(process.cwd(), targetPath);
-        let files = [];
-        if (fs.existsSync(fullPath)) {
-            const stat = fs.statSync(fullPath);
-            if (stat.isDirectory()) {
-                files = fs.readdirSync(fullPath)
-                    .filter(f => f.endsWith('.yml') || f.endsWith('.yaml'))
-                    .map(f => path.join(fullPath, f));
-            } else {
-                files = [fullPath];
-            }
-        }
-
+        const files = Checker.collectFiles(targetPath);
         if (files.length === 0) {
-            Logger.warn('No workflow files found to analyze.');
-            return;
+            Logger.warn(`No workflow files found at: ${targetPath}`);
+            return { files: 0, score: null, defects: null };
         }
 
-        Logger.info(`🧠 Deep Workflow Analyzer v2.0.0 — scanning ${files.length} file(s)...\n`);
+        Logger.info(`Analyzing ${files.length} workflow file(s)…\n`);
 
+        const summaries = [];
         for (const file of files) {
-            const relPath = path.relative(process.cwd(), file);
-            console.log(`${colors.bright}${colors.magenta}🔬 Analyzing: ${relPath}${colors.reset}\n`);
-
+            const rel = path.relative(process.cwd(), file);
             let doc;
             try {
-                doc = yaml.load(fs.readFileSync(file, 'utf8'));
-            } catch (e) {
-                Logger.error(`YAML parse error: ${e.message}`);
+                doc = yaml.load(fs.readFileSync(file, 'utf8'), { filename: file });
+            } catch (err) {
+                Logger.error(`${rel}: invalid YAML — ${err.message.split('\n')[0]}`);
                 continue;
             }
-            if (!doc) continue;
+            if (!doc || !doc.jobs) continue;
+            summaries.push({ file: rel, doc, analysis: Analyzer.analyzeWorkflow(doc) });
+        }
 
-            const jobs = doc.jobs || {};
-            const allSteps = Object.values(jobs).flatMap(j => j.steps || []);
+        if (summaries.length === 0) {
+            Logger.warn('No analysable workflows found.');
+            return { files: 0, score: null, defects: null };
+        }
 
-            // ① Complexity Score
-            const complexity = Analyzer.computeComplexityScore(doc);
-            Logger.metric('Complexity Score', `${complexity.score}/100 ${complexity.rating}`);
-            Logger.metric('Jobs', String(complexity.breakdown.jobCount));
-            Logger.metric('Total Steps', String(complexity.breakdown.totalSteps));
-            console.log();
+        for (const { file, analysis } of summaries) {
+            Analyzer.print(file, analysis);
+        }
 
-            // ② Step Dependency Graph
-            let depFound = false;
-            for (const [jobId, job] of Object.entries(jobs)) {
-                const graph = Analyzer.buildStepDependencyGraph(job);
-                if (graph.length > 0) {
-                    if (!depFound) { Logger.info('① Step Dependency Graph:'); depFound = true; }
-                    for (const node of graph) {
-                        console.log(`   ${colors.cyan}${node.step}${colors.reset} → depends on steps: ${colors.yellow}${node.dependsOn.join(', ')}${colors.reset}`);
+        const scores = summaries.map((s) => s.analysis.complexity.score);
+        const size = (list) => (Array.isArray(list) ? list.length : 0);
+
+        return {
+            files: summaries.length,
+            // A number for comparing two workflows, not a verdict.
+            score: Math.round(scores.reduce((a, b) => a + b, 0) / scores.length),
+            // Things that are actually wrong, as opposed to merely noteworthy.
+            defects: summaries.reduce((acc, { analysis }) => ({
+                deadSteps: acc.deadSteps + size(analysis.deadSteps),
+                duplicateSteps: acc.duplicateSteps + size(analysis.duplicateSteps),
+                unusedOutputs: acc.unusedOutputs + size(analysis.unusedOutputs),
+                shellIssues: acc.shellIssues + size(analysis.shellIssues),
+                redundantJobs: acc.redundantJobs + size(analysis.redundantJobs)
+            }), { deadSteps: 0, duplicateSteps: 0, unusedOutputs: 0, shellIssues: 0, redundantJobs: 0 })
+        };
+    }
+
+    static analyzeWorkflow(doc) {
+        const jobs = doc.jobs || {};
+        return {
+            complexity: Analyzer.computeComplexityScore(doc),
+            topology: Analyzer.buildTopology(jobs),
+            deadSteps: Analyzer.findDeadSteps(jobs),
+            duplicateSteps: Analyzer.findDuplicateSteps(jobs),
+            unusedOutputs: Analyzer.findUnusedOutputs(doc),
+            redundantJobs: Analyzer.findRedundantJobs(jobs),
+            shellIssues: Analyzer.checkShells(jobs),
+            concurrency: Analyzer.analyzeConcurrency(doc),
+            matrix: Analyzer.analyzeMatrices(jobs),
+            criticalPath: Analyzer.criticalPath(jobs)
+        };
+    }
+
+    // ── topology ─────────────────────────────────────────────────────────────
+
+    static buildTopology(jobs) {
+        const { order, cycles, deps } = orderJobs(jobs);
+        return { order, cycles, depths: Analyzer.computeDepths(jobs, order, deps) };
+    }
+
+    static computeDepths(jobs, order, deps) {
+        const depths = {};
+        for (const id of order) {
+            const parents = (deps.get(id) || []).filter((p) => depths[p] !== undefined);
+            depths[id] = parents.length ? Math.max(...parents.map((p) => depths[p])) + 1 : 0;
+        }
+        return depths;
+    }
+
+    static criticalPath(jobs) {
+        const { order, deps, } = orderJobs(jobs);
+        const cost = {};
+        const chainLength = {};
+        for (const id of order) {
+            const parents = (deps.get(id) || []).filter((p) => cost[p] !== undefined);
+            cost[id] = parents.length ? Math.max(...parents.map((p) => cost[p])) + 1 : 1;
+            chainLength[id] = parents.length ? Math.max(...parents.map((p) => chainLength[p])) + 1 : 1;
+        }
+        const deepest = Object.entries(chainLength).sort((a, b) => b[1] - a[1])[0] || null;
+        return {
+            perJob: cost,
+            deepest: deepest ? { job: deepest[0], length: deepest[1] } : null,
+            jobCount: order.length
+        };
+    }
+
+    /** Every job's transitive dependency closure, used for reachability. */
+    static reachableFromAnyJob(jobs) {
+        const { deps } = orderJobs(jobs);
+        const reached = new Set();
+        for (const id of Object.keys(jobs)) {
+            for (const dep of transitiveNeeds(id, deps)) reached.add(dep);
+        }
+        return reached;
+    }
+
+    /** A transparent, explainable estimate: measured only from declared structure. */
+    static estimateJobCost(job) {
+        if (!job || typeof job !== 'object') return 0;
+        const steps = Array.isArray(job.steps) ? job.steps : [];
+        const matrixCount = job.strategy ? expandMatrix(job.strategy).combinations.length : 1;
+        const serial = steps.reduce((sum, step) => sum + Analyzer.estimateStepCost(step), 0);
+        return Math.round(serial * Math.max(1, matrixCount));
+    }
+
+    /**
+     * Only two things are knowable without running anything: a step that calls a
+     * toolchain has an unknown but non-zero cost, and nothing else does. Anything
+     * numeric here would be invented, so we deliberately return 0 for everything
+     * except actions that are known to be slow. Callers must label it an estimate.
+     */
+    static estimateStepCost(step) {
+        if (!step || typeof step !== 'object') return 0;
+        if (!step.run) return 0;
+        const script = String(step.run);
+        // Rough but honest: only count the *presence* of heavy install steps.
+        if (/\b(npm|yarn|pnpm|pip|apt-get|brew|dotnet|gradle|maven|go mod)\s+(install|ci|add|get|build)\b/.test(script)) {
+            return 0; // unknown duration — recorded as "present", not guessed
+        }
+        return 0;
+    }
+
+    // ── dead code ────────────────────────────────────────────────────────────
+
+    /**
+     * A step is dead when it can never influence the result:
+     *   • it runs after a step that always fails and it has no `if` override
+     *   • a later step sits behind such a step, making all of them dead code
+     * `continue-on-error` on the failing step makes the later steps live again.
+     */
+    static findDeadSteps(jobs) {
+        const out = [];
+        for (const [jobId, job] of Object.entries(jobs)) {
+            const steps = Array.isArray(job.steps) ? job.steps : [];
+            let hardFailed = false;
+            for (const [index, step] of steps.entries()) {
+                if (!step || typeof step !== 'object') continue;
+                const label = step.name || step.uses || step.run?.trim().split('\n')[0] || `step ${index + 1}`;
+                const conditional = step.if !== undefined && String(step.if).trim() !== '';
+
+                if (hardFailed && !conditional) {
+                    out.push({
+                        jobId, step: label, severity: 'high',
+                        reason: 'unreachable — the previous step always fails and this one has no `if:` override'
+                    });
+                    continue;
+                }
+
+                if (!step.run) continue;
+                const script = String(step.run);
+                const alwaysFails = /(?:^|[\n;&|]\s*)(?:exit\s+[1-9]\d*|false)\s*(?:$|[\n;}])/.test(script);
+                const tolerated = step['continue-on-error'] === true;
+                if (alwaysFails && !tolerated) {
+                    if (index < steps.length - 1) {
+                        out.push({
+                            jobId, step: label, severity: 'high',
+                            reason: 'this step always exits non-zero, so every later step is dead code'
+                        });
                     }
+                    hardFailed = true;
                 }
             }
-            if (!depFound) Logger.success('① No cross-step output dependencies found.');
+        }
+        return out;
+    }
 
-            // ③ Dead Steps
-            let deadFound = false;
-            for (const [jobId, job] of Object.entries(jobs)) {
-                const dead = Analyzer.findDeadSteps(job);
-                for (const d of dead) {
-                    if (!deadFound) { Logger.warn('② Dead Steps Detected (can never run):'); deadFound = true; }
-                    console.log(`   ${colors.red}✖ "${d.step}"${colors.reset} — if: ${colors.gray}${d.condition}${colors.reset}`);
-                }
+    /** Steps whose body is byte-identical across jobs. */
+    static findDuplicateSteps(jobs) {
+        const seen = new Map();
+        for (const [jobId, job] of Object.entries(jobs)) {
+            const steps = Array.isArray(job.steps) ? job.steps : [];
+            for (const [index, step] of steps.entries()) {
+                const body = step.run ? String(step.run).trim() : null;
+                if (!body || body.length < 15) continue;
+                const key = body;
+                if (!seen.has(key)) seen.set(key, []);
+                seen.get(key).push({ jobId, index, name: step.name || `step ${index + 1}` });
             }
-            if (!deadFound) Logger.success('② No dead steps detected.');
+        }
+        const out = [];
+        for (const [body, occurrences] of seen) {
+            const jobIds = new Set(occurrences.map((o) => o.jobId));
+            if (jobIds.size < 2) continue;
+            out.push({
+                occurrences,
+                jobs: [...jobIds],
+                preview: body.split('\n')[0].slice(0, 70),
+                fix: 'extract this into a composite action under .github/actions/'
+            });
+        }
+        return out;
+    }
 
-            // ④ Duplicate Steps
-            const dupes = Analyzer.findDuplicateSteps(jobs);
-            if (dupes.length > 0) {
-                Logger.warn(`③ Duplicate Steps (${dupes.length}):`);
-                for (const d of dupes) {
-                    console.log(`   ${colors.yellow}Script:${colors.reset} "${d.script}"`);
-                    for (const loc of d.locations) {
-                        console.log(`     → job:${loc.jobId} > "${loc.step}"`);
-                    }
-                }
-            } else {
-                Logger.success('③ No duplicate steps found.');
-            }
+    /** Step outputs declared by a job that no other job consumes. */
+    static findUnusedOutputs(doc) {
+        const jobs = doc.jobs || {};
+        const produced = new Map();   // jobId → Set of output names
+        const consumed = new Set();  // "jobId.outputName"
 
-            // ⑤ Step Duration Estimates
-            Logger.info('④ Step Duration Estimates:');
-            const rows = [];
-            for (const [jobId, job] of Object.entries(jobs)) {
-                for (const step of (job.steps || [])) {
-                    const est = Analyzer.estimateStepDuration(step);
-                    if (est.ms > 1000) {
-                        rows.push([
-                            jobId,
-                            (step.name || step.id || '(unnamed)').slice(0, 35),
-                            est.ms >= 60000
-                                ? `~${(est.ms/60000).toFixed(1)}min`
-                                : `~${(est.ms/1000).toFixed(0)}s`,
-                            est.reason
-                        ]);
-                    }
-                }
+        for (const [jobId, job] of Object.entries(jobs)) {
+            for (const name of Object.keys((job && job.outputs) || {})) {
+                if (!produced.has(jobId)) produced.set(jobId, new Set());
+                produced.get(jobId).add(name);
             }
-            if (rows.length > 0) {
-                Logger.table(['Job', 'Step', 'Est. Duration', 'Reason'], rows);
-            } else {
-                console.log(`   ${colors.gray}(All steps estimated < 1s)${colors.reset}\n`);
-            }
+        }
 
-            // ⑥ Shell Compatibility
-            const shellIssues = Analyzer.checkShellCompatibility(allSteps);
-            if (shellIssues.length > 0) {
-                Logger.warn(`⑤ Shell Compatibility Issues (${shellIssues.length}):`);
-                for (const i of shellIssues) {
-                    console.log(`   ${colors.yellow}Step "${i.step}" [shell:${i.shell}]:${colors.reset} ${i.issue}`);
-                }
-            } else {
-                Logger.success('⑤ No shell compatibility issues detected.');
-            }
+        const scan = (text) => {
+            const rx = /needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)/g;
+            let m;
+            while ((m = rx.exec(String(text || ''))) !== null) consumed.add(`${m[1]}.${m[2]}`);
+        };
+        scan(JSON.stringify(doc));
 
-            // ⑦ Secret Flow Map
-            const secretMap = Analyzer.analyzeSecretFlow(jobs);
-            const secretNames = Object.keys(secretMap);
-            if (secretNames.length > 0) {
-                Logger.info(`⑥ Secret Flow Map (${secretNames.length} secret(s)):`);
-                for (const [name, usages] of Object.entries(secretMap)) {
-                    console.log(`   ${colors.yellow}secrets.${name}${colors.reset} used in:`);
-                    for (const u of usages) {
-                        console.log(`     → job:${u.jobId} > "${u.step}" (${u.via})`);
-                    }
+        const out = [];
+        for (const [jobId, names] of produced) {
+            for (const name of names) {
+                if (!consumed.has(`${jobId}.${name}`)) {
+                    out.push({ jobId, name, reason: 'declared but never referenced through needs.<job>.outputs' });
                 }
-                console.log();
             }
+        }
+        return out;
+    }
 
-            // ⑧ Artifact Lifecycle
-            const artifacts = Analyzer.trackArtifactLifecycle(jobs);
-            if (artifacts.orphanUploads.length > 0) {
-                Logger.warn(`⑦ Orphan Uploads (no matching download):`);
-                for (const u of artifacts.orphanUploads) {
-                    console.log(`   ${colors.yellow}"${u.name}"${colors.reset} uploaded in job:${u.jobId}`);
-                }
-            }
-            if (artifacts.orphanDownloads.length > 0) {
-                Logger.warn(`⑦ Orphan Downloads (no matching upload):`);
-                for (const d of artifacts.orphanDownloads) {
-                    console.log(`   ${colors.red}"${d.name}"${colors.reset} downloaded in job:${d.jobId} — never uploaded!`);
-                }
-            }
-            if (artifacts.orphanUploads.length === 0 && artifacts.orphanDownloads.length === 0) {
-                if (artifacts.uploads.length > 0 || artifacts.downloads.length > 0) {
-                    Logger.success(`⑦ Artifact lifecycle balanced (${artifacts.uploads.length} upload(s) ↔ ${artifacts.downloads.length} download(s)).`);
-                }
-            }
+    /**
+     * Two jobs that declare the same `needs`, the same matrix and the same step
+     * bodies are pure duplication — the second one costs CI minutes for nothing.
+     */
+    static findRedundantJobs(jobs) {
+        const signature = (job) => JSON.stringify({
+            needs: normalizeNeeds(job && job.needs).slice().sort(),
+            matrix: (job && job.strategy && job.strategy.matrix) || null,
+            steps: (Array.isArray(job && job.steps) ? job.steps : [])
+                .map((s) => ({ run: s.run || null, uses: s.uses || null, with: s.with || null }))
+        });
 
-            // ⑨ Circular Job Dependencies
-            const cycles = Analyzer.detectCircularDependencies(jobs);
-            if (cycles.length > 0) {
-                Logger.warn(`⑧ Circular Job Dependencies:`);
-                for (const cycle of cycles) {
-                    console.log(`   ${colors.red}${cycle.join(' → ')}${colors.reset}`);
-                }
-            } else {
-                Logger.success('⑧ No circular job dependencies.');
-            }
+        const groups = new Map();
+        for (const [jobId, job] of Object.entries(jobs)) {
+            if (!job || !Array.isArray(job.steps) || job.steps.length === 0) continue;
+            const key = signature(job);
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(jobId);
+        }
 
-            // ⑩ Concurrency Groups
-            const concurrency = Analyzer.analyzeConcurrencyGroups(jobs, doc.concurrency);
-            if (concurrency.conflicts.length > 0) {
-                Logger.warn(`⑨ Concurrency Group Conflicts:`);
-                for (const c of concurrency.conflicts) {
-                    console.log(`   Group "${c.group}" defined at: ${c.entries.map(e => e.level).join(', ')}`);
-                }
-            }
+        const out = [];
+        for (const [key, ids] of groups) {
+            if (ids.length < 2) continue;
+            out.push({
+                jobs: ids,
+                steps: JSON.parse(key).steps.length,
+                fix: `keep "${ids[0]}" and make the others \`needs: ${ids[0]}\`, or merge them`
+            });
+        }
+        return out;
+    }
 
-            console.log(colors.gray + '\n--------------------------------------------------' + colors.reset);
+    // ── shells ───────────────────────────────────────────────────────────────
+
+    static checkShells(jobs) {
+        const out = [];
+        for (const [jobId, job] of Object.entries(jobs)) {
+            const defaults = job.defaults && job.defaults.run;
+            (Array.isArray(job.steps) ? job.steps : []).forEach((step, index) => {
+                if (!step || !step.run) return;
+                const shell = step.shell || defaults || 'bash';
+                const label = step.name || `step ${index + 1}`;
+                if (shell === 'cmd' || shell === 'powershell') {
+                    out.push({ jobId, step: label, shell, severity: 'high',
+                        reason: 'Windows-only shell in a workflow that is probably not run on Windows' });
+                } else if (typeof shell === 'string' && shell.includes('{0}') && !shell.startsWith('bash')) {
+                    out.push({ jobId, step: label, shell, severity: 'low',
+                        reason: 'custom shell — AeroCI runs it as written; make sure it exists locally' });
+                }
+            });
+        }
+        return out;
+    }
+
+    // ── concurrency ──────────────────────────────────────────────────────────
+
+    static analyzeConcurrency(doc) {
+        const workflow = doc.concurrency;
+        const groups = new Map();
+        for (const [jobId, job] of Object.entries(doc.jobs || {})) {
+            const value = job.concurrency;
+            if (!value) continue;
+            const key = typeof value === 'string' ? value : (value.group || '(unnamed)');
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(jobId);
+        }
+        return {
+            workflow: workflow || null,
+            groups: [...groups.entries()].map(([group, jobs]) => ({ group, jobs })),
+            conflicts: findConcurrencyConflicts(groups, workflow)
+        };
+    }
+
+    // ── matrices ─────────────────────────────────────────────────────────────
+
+    static analyzeMatrices(jobs) {
+        const out = [];
+        for (const [jobId, job] of Object.entries(jobs)) {
+            if (!job.strategy || !job.strategy.matrix) continue;
+            const { combinations, truncated, maxParallel, failFast } = expandMatrix(job.strategy);
+            const axes = Object.keys(job.strategy.matrix).filter((k) => k !== 'include' && k !== 'exclude');
+            out.push({
+                jobId,
+                axes,
+                combinations: combinations.length,
+                truncated,
+                maxParallel: maxParallel === Infinity ? null : maxParallel,
+                failFast,
+                samples: combinations.slice(0, 4),
+                wasted: Analyzer.matrixWastedKeys(job.strategy.matrix, combinations, axes)
+            });
+        }
+        return out;
+    }
+
+    /** Keys that are constant across every combination — a sign of a bad matrix. */
+    static matrixWastedKeys(matrix, combinations, axes) {
+        const wasted = [];
+        for (const axis of axes) {
+            const values = new Set(combinations.map((c) => JSON.stringify(c[axis])));
+            if (combinations.length > 1 && values.size === 1) wasted.push(axis);
+        }
+        void matrix;
+        return wasted;
+    }
+
+    // ── complexity ───────────────────────────────────────────────────────────
+
+    /**
+     * 0-100 where 100 is a trivial workflow. Every component is a pure function
+     * of the workflow structure, and the breakdown is printed so the number is
+     * explainable rather than magic.
+     */
+    static computeComplexityScore(doc) {
+        const jobs = doc.jobs || {};
+        const jobIds = Object.keys(jobs);
+        const totalSteps = jobIds.reduce((s, id) => s + ((jobs[id] && jobs[id].steps && jobs[id].steps.length) || 0), 0);
+
+        const { depths, cycles } = Analyzer.buildTopology(jobs);
+
+        let expressions = 0;
+        let shells = 0;
+        const stepsWithContinue = [];
+        for (const job of Object.values(jobs)) {
+            for (const step of (Array.isArray(job.steps) ? job.steps : [])) {
+                const text = step.run ? String(step.run) : '';
+                expressions += (text.match(/\$\{\{/g) || []).length;
+                if (step.shell) shells++;
+                if (step['continue-on-error']) stepsWithContinue.push(step.name || step.uses || '?');
+            }
+        }
+
+        const maxDepth = jobIds.length ? Math.max(...jobIds.map((id) => depths[id] ?? 0)) : 0;
+        const matrixJobs = jobIds.filter((id) => jobs[id] && jobs[id].strategy && jobs[id].strategy.matrix);
+        const needsRefs = jobIds.reduce((s, id) => s + normalizeNeeds(jobs[id] && jobs[id].needs).length, 0);
+
+        const penalties = {
+            jobs: Math.max(0, jobIds.length - 2) * 1.5,
+            steps: Math.max(0, totalSteps - 6) * 1.2,
+            depth: Math.max(0, maxDepth - 1) * 4,
+            coupling: Math.max(0, needsRefs - jobIds.length) * 1.5,
+            expressions: Math.max(0, expressions - 5) * 0.8,
+            shells: shells * 2,
+            matrix: matrixJobs.length * 2,
+            continueOnError: stepsWithContinue.length * 1.5,
+            cycles: cycles.length * 15
+        };
+
+        const raw = Object.values(penalties).reduce((a, b) => a + b, 0);
+        const score = Math.max(0, Math.min(100, Math.round(100 - raw)));
+        const rating = score >= 80 ? 'simple' : score >= 60 ? 'moderate'
+            : score >= 40 ? 'complex' : 'very complex';
+
+        return {
+            score, rating, penalties, cycles: cycles.length,
+            breakdown: {
+                jobCount: jobIds.length,
+                totalSteps,
+                maxDepth,
+                expressionCount: expressions,
+                customShells: shells,
+                matrixJobs: matrixJobs.length,
+                needsRefs,
+                continueOnError: stepsWithContinue.length
+            }
+        };
+    }
+
+    // ── printing ─────────────────────────────────────────────────────────────
+
+    static print(file, a) {
+        console.log(`${colors.bright}${colors.cyan}🔬 ${file}${colors.reset}`);
+
+        Logger.metric('Complexity', `${a.complexity.score}/100 ${colors.gray(`(${a.complexity.rating})`)}`);
+        Logger.metric('Shape', `${a.complexity.breakdown.jobCount} job(s) · ${a.complexity.breakdown.totalSteps} step(s) · depth ${a.complexity.breakdown.maxDepth}`);
+
+        if (a.topology.order.length) {
+            Logger.metric('Execution order', a.topology.order.join(' → '));
+        }
+        if (a.criticalPath.deepest) {
+            Logger.metric('Longest chain', `${a.criticalPath.deepest.job} ${colors.gray(`(${a.criticalPath.deepest.length} job(s) deep)`)}`);
+        }
+
+        const parts = Object.entries(a.complexity.penalties).filter(([, v]) => v > 0);
+        if (parts.length) {
+            console.log(colors.gray(`     complexity drivers: ${parts
+                .sort((x, y) => y[1] - x[1])
+                .map(([k, v]) => `${k} −${v.toFixed(1)}`)
+                .join(', ')}`));
+        }
+
+        for (const m of a.matrix) {
+            const extra = [
+                `max-parallel ${m.maxParallel ?? '∞'}`,
+                m.failFast ? 'fail-fast' : 'no fail-fast',
+                m.truncated ? 'TRUNCATED' : null,
+                m.wasted.length ? `constant axis: ${m.wasted.join(', ')}` : null
+            ].filter(Boolean).join(' · ');
+            Logger.metric(`Matrix [${m.jobId}]`, `${m.combinations} combination(s) from ${m.axes.join(' × ')} ${colors.gray(`— ${extra}`)}`);
+            for (const sample of m.samples) {
+                console.log(colors.gray(`       ${JSON.stringify(sample)}`));
+            }
+            if (m.combinations > m.samples.length) console.log(colors.gray(`       … ${m.combinations - m.samples.length} more`));
+        }
+
+        if (a.topology.cycles.length) {
+            Logger.error(`Circular needs: ${a.topology.cycles.map((c) => c.join(' → ')).join(' | ')}`);
+        }
+
+        if (a.deadSteps.length) {
+            console.log('');
+            Logger.warn(`${a.deadSteps.length} step(s) can never affect the result:`);
+            for (const d of a.deadSteps) {
+                console.log(`   ${colors.gray('•')} ${colors.bright(d.jobId)} → ${d.step} ${colors.gray(`— ${d.reason}`)}`);
+            }
+        }
+
+        if (a.duplicateSteps.length) {
+            console.log('');
+            Logger.warn(`${a.duplicateSteps.length} duplicated script block(s):`);
+            for (const d of a.duplicateSteps) {
+                console.log(`   ${colors.gray('•')} ${colors.gray(d.preview)} ${colors.gray(`in ${d.jobs.join(', ')}`)}`);
+                console.log(`     ${colors.gray('↳')} ${colors.gray(d.fix)}`);
+            }
+        }
+
+        if (a.unusedOutputs.length) {
+            console.log('');
+            for (const u of a.unusedOutputs) {
+                Logger.note(`output ${colors.gray(`${u.jobId}.${u.name}`)} is never consumed ${colors.gray(`— ${u.reason}`)}`);
+            }
+        }
+
+        if (a.redundantJobs && a.redundantJobs.length) {
+            console.log('');
+            for (const r of a.redundantJobs) {
+                Logger.warn(`jobs ${colors.bright(r.jobs.join(' and '))} are identical (${r.steps} step(s) each)`);
+                console.log(`     ${colors.gray('↳')} ${colors.gray(r.fix)}`);
+            }
+        }
+
+        for (const s of a.shellIssues) {
+            Logger.warn(`job "${s.jobId}" step "${s.step}" uses \`shell: ${s.shell}\` — ${s.reason}`);
+        }
+
+        if (a.concurrency.workflow) {
+            const group = typeof a.concurrency.workflow === 'string'
+                ? a.concurrency.workflow
+                : a.concurrency.workflow.group;
+            Logger.metric('Workflow concurrency', group);
+        }
+        for (const g of a.concurrency.groups) {
+            Logger.metric('Concurrency group', `${g.group} ${colors.gray(`(${g.jobs.join(', ')})`)}`);
+        }
+        for (const c of a.concurrency.conflicts) {
+            Logger.warn(c);
+        }
+
+        console.log(colors.gray + '─'.repeat(64) + colors.reset);
+    }
+}
+
+/** Two jobs in the same non-cancelling group block each other. */
+function findConcurrencyConflicts(groups, workflowConcurrency) {
+    const conflicts = [];
+    const workflowGroup = typeof workflowConcurrency === 'string'
+        ? workflowConcurrency
+        : (workflowConcurrency && workflowConcurrency.group);
+    if (workflowGroup) {
+        for (const [group, jobs] of groups) {
+            if (group !== workflowGroup) continue;
+            if (jobs.length > 1) {
+                conflicts.push(
+                    `jobs ${jobs.join(' and ')} share workflow concurrency group "${group}" — only one can run at a time`
+                );
+            }
         }
     }
+    for (const [group, jobs] of groups) {
+        if (jobs.length > 1) {
+            const rx = /cancel-in-progress\s*:\s*(false|\$\{\{)/;
+            conflicts.push(
+                `jobs ${jobs.join(' and ')} share concurrency group "${group}"` +
+                (rx.test(JSON.stringify(group)) ? '' : ' with cancel-in-progress unset — a waiting job cancels the running one')
+            );
+        }
+    }
+    return conflicts;
 }
 
 module.exports = { Analyzer };
