@@ -3,9 +3,14 @@
  *
  * Structural intelligence about a workflow graph: which steps can never be
  * reached, which outputs are produced but never consumed, which jobs duplicate
- * work, how the complexity adds up, and what the wall-clock cost will be.
+ * work, how the matrix expands, which jobs could overlap, and how the
+ * complexity adds up.
  *
- * Every number here is derived from the workflow itself — no invented estimates.
+ * Every number here is derived from the workflow itself. Nothing here is a
+ * duration: a step that calls `npm ci` has no knowable length from the file
+ * alone, and a tool that printed a made-up one would be a tool you could not
+ * trust about anything else it says. Timing comes from `aeroci run
+ * --profile`, which measures the steps.
  */
 
 const fs = require('fs');
@@ -16,12 +21,26 @@ const { orderJobs, normalizeNeeds, transitiveNeeds } = require('./graph');
 const { expandMatrix } = require('./matrix');
 const { Checker } = require('./checker');
 
+/**
+ * Shells that exist only on a Windows runner. `pwsh` is the default on
+ * `windows-latest` and was missing from this list, so the commonest Windows
+ * shell in a workflow was the one nobody warned you about.
+ */
+const WINDOWS_SHELLS = new Set(['cmd', 'powershell', 'pwsh']);
+
 class Analyzer {
-    static analyze(targetPath = '.github/workflows') {
+    /**
+     * @param {string}  targetPath   file, directory or project root
+     * @param {object}  [options]
+     * @param {boolean} [options.print=true]  draw the per-workflow tables.
+     *   `--json` turns this off: the tables and the JSON cannot both be on
+     *   stdout, and the flag is only useful if a parser can read the result.
+     */
+    static analyze(targetPath = '.github/workflows', { print = true } = {}) {
         const files = Checker.collectFiles(targetPath);
         if (files.length === 0) {
             Logger.warn(`No workflow files found at: ${targetPath}`);
-            return { files: 0, score: null, defects: null };
+            return { workflows: [], files: 0, score: null, defects: null };
         }
 
         Logger.info(`Analyzing ${files.length} workflow file(s)…\n`);
@@ -42,17 +61,26 @@ class Analyzer {
 
         if (summaries.length === 0) {
             Logger.warn('No analysable workflows found.');
-            return { files: 0, score: null, defects: null };
+            return { workflows: [], files: 0, score: null, defects: null };
         }
 
-        for (const { file, analysis } of summaries) {
-            Analyzer.print(file, analysis);
+        if (print) {
+            for (const { file, analysis } of summaries) {
+                Analyzer.print(file, analysis);
+            }
         }
 
         const scores = summaries.map((s) => s.analysis.complexity.score);
         const size = (list) => (Array.isArray(list) ? list.length : 0);
 
         return {
+            // Per workflow, the same analysis the table above was printed from:
+            // graph, findings, matrix, concurrency, critical path, complexity.
+            // It used to be dropped here and only the three summary fields were
+            // returned, so `--json` was "machine-readable" for a number and
+            // nothing else — a script could learn the score and not one reason.
+            // `doc` is left out: it is the file the consumer already has a path to.
+            workflows: summaries.map(({ file, analysis }) => ({ file, ...analysis })),
             files: summaries.length,
             // A number for comparing two workflows, not a verdict.
             score: Math.round(scores.reduce((a, b) => a + b, 0) / scores.length),
@@ -126,32 +154,6 @@ class Analyzer {
         return reached;
     }
 
-    /** A transparent, explainable estimate: measured only from declared structure. */
-    static estimateJobCost(job) {
-        if (!job || typeof job !== 'object') return 0;
-        const steps = Array.isArray(job.steps) ? job.steps : [];
-        const matrixCount = job.strategy ? expandMatrix(job.strategy).combinations.length : 1;
-        const serial = steps.reduce((sum, step) => sum + Analyzer.estimateStepCost(step), 0);
-        return Math.round(serial * Math.max(1, matrixCount));
-    }
-
-    /**
-     * Only two things are knowable without running anything: a step that calls a
-     * toolchain has an unknown but non-zero cost, and nothing else does. Anything
-     * numeric here would be invented, so we deliberately return 0 for everything
-     * except actions that are known to be slow. Callers must label it an estimate.
-     */
-    static estimateStepCost(step) {
-        if (!step || typeof step !== 'object') return 0;
-        if (!step.run) return 0;
-        const script = String(step.run);
-        // Rough but honest: only count the *presence* of heavy install steps.
-        if (/\b(npm|yarn|pnpm|pip|apt-get|brew|dotnet|gradle|maven|go mod)\s+(install|ci|add|get|build)\b/.test(script)) {
-            return 0; // unknown duration — recorded as "present", not guessed
-        }
-        return 0;
-    }
-
     // ── dead code ────────────────────────────────────────────────────────────
 
     /**
@@ -159,6 +161,13 @@ class Analyzer {
      *   • it runs after a step that always fails and it has no `if` override
      *   • a later step sits behind such a step, making all of them dead code
      * `continue-on-error` on the failing step makes the later steps live again.
+     *
+     * Two kinds come back, and the difference matters. The step that always
+     * fails is `always-fails`: it is the cause, it *does* affect the result (it
+     * ends the job), and it is worth reporting. The steps behind it are
+     * `unreachable`: they cannot run at all. The printed summary used to count
+     * both under "can never affect the result", which is true of one and false
+     * of the other.
      */
     static findDeadSteps(jobs) {
         const out = [];
@@ -172,7 +181,7 @@ class Analyzer {
 
                 if (hardFailed && !conditional) {
                     out.push({
-                        jobId, step: label, severity: 'high',
+                        jobId, step: label, kind: 'unreachable', severity: 'high',
                         reason: 'unreachable — the previous step always fails and this one has no `if:` override'
                     });
                     continue;
@@ -185,7 +194,7 @@ class Analyzer {
                 if (alwaysFails && !tolerated) {
                     if (index < steps.length - 1) {
                         out.push({
-                            jobId, step: label, severity: 'high',
+                            jobId, step: label, kind: 'always-fails', severity: 'high',
                             reason: 'this step always exits non-zero, so every later step is dead code'
                         });
                     }
@@ -291,14 +300,22 @@ class Analyzer {
     static checkShells(jobs) {
         const out = [];
         for (const [jobId, job] of Object.entries(jobs)) {
-            const defaults = job.defaults && job.defaults.run;
+            // `defaults.run` is an object, so this has to reach through to
+            // `.shell`. It used to assign the object itself, and a step with no
+            // shell of its own was then checked against `{shell: 'pwsh'}` — an
+            // object, which matches nothing and is not a string, so an inherited
+            // Windows shell was silently missed in every workflow that used
+            // `defaults:`.
+            const runDefaults = (job.defaults && job.defaults.run) || {};
+            const inherited = typeof runDefaults.shell === 'string' ? runDefaults.shell : null;
+            const onWindows = Analyzer.runsOnWindows(job);
             (Array.isArray(job.steps) ? job.steps : []).forEach((step, index) => {
                 if (!step || !step.run) return;
-                const shell = step.shell || defaults || 'bash';
+                const shell = step.shell || inherited || 'bash';
                 const label = step.name || `step ${index + 1}`;
-                if (shell === 'cmd' || shell === 'powershell') {
+                if (WINDOWS_SHELLS.has(shell) && !onWindows) {
                     out.push({ jobId, step: label, shell, severity: 'high',
-                        reason: 'Windows-only shell in a workflow that is probably not run on Windows' });
+                        reason: 'Windows-only shell in a job whose `runs-on` is not Windows' });
                 } else if (typeof shell === 'string' && shell.includes('{0}') && !shell.startsWith('bash')) {
                     out.push({ jobId, step: label, shell, severity: 'low',
                         reason: 'custom shell — AeroCI runs it as written; make sure it exists locally' });
@@ -306,6 +323,22 @@ class Analyzer {
             });
         }
         return out;
+    }
+
+    /**
+     * Whether the job says it runs on Windows.
+     *
+     * `runs-on` is a string, an array, or an expression, so this reads all
+     * three and only claims Windows when the word is actually there. A job
+     * pinned to `windows-latest` using `pwsh` is not a defect; the same shell in
+     * a job pinned to `ubuntu-latest` cannot work, which is the finding. The
+     * check ignored `runs-on` entirely, so it reported a correct Windows job as
+     * a bug and missed `pwsh`, the default there.
+     */
+    static runsOnWindows(job) {
+        const raw = (job || {})['runs-on'];
+        const text = Array.isArray(raw) ? raw.join(' ') : String(raw ?? '');
+        return /windows/i.test(text);
     }
 
     // ── concurrency ──────────────────────────────────────────────────────────
@@ -323,7 +356,7 @@ class Analyzer {
         return {
             workflow: workflow || null,
             groups: [...groups.entries()].map(([group, jobs]) => ({ group, jobs })),
-            conflicts: findConcurrencyConflicts(groups, workflow)
+            conflicts: findConcurrencyConflicts(groups, workflow, doc.jobs || {})
         };
     }
 
@@ -425,7 +458,7 @@ class Analyzer {
     // ── printing ─────────────────────────────────────────────────────────────
 
     static print(file, a) {
-        console.log(`${colors.bright}${colors.cyan}🔬 ${file}${colors.reset}`);
+        Logger.emit(`${colors.bright}${colors.cyan}🔬 ${file}${colors.reset}`);
 
         Logger.metric('Complexity', `${a.complexity.score}/100 ${colors.gray(`(${a.complexity.rating})`)}`);
         Logger.metric('Shape', `${a.complexity.breakdown.jobCount} job(s) · ${a.complexity.breakdown.totalSteps} step(s) · depth ${a.complexity.breakdown.maxDepth}`);
@@ -439,7 +472,7 @@ class Analyzer {
 
         const parts = Object.entries(a.complexity.penalties).filter(([, v]) => v > 0);
         if (parts.length) {
-            console.log(colors.gray(`     complexity drivers: ${parts
+            Logger.emit(colors.gray(`     complexity drivers: ${parts
                 .sort((x, y) => y[1] - x[1])
                 .map(([k, v]) => `${k} −${v.toFixed(1)}`)
                 .join(', ')}`));
@@ -454,9 +487,9 @@ class Analyzer {
             ].filter(Boolean).join(' · ');
             Logger.metric(`Matrix [${m.jobId}]`, `${m.combinations} combination(s) from ${m.axes.join(' × ')} ${colors.gray(`— ${extra}`)}`);
             for (const sample of m.samples) {
-                console.log(colors.gray(`       ${JSON.stringify(sample)}`));
+                Logger.emit(colors.gray(`       ${JSON.stringify(sample)}`));
             }
-            if (m.combinations > m.samples.length) console.log(colors.gray(`       … ${m.combinations - m.samples.length} more`));
+            if (m.combinations > m.samples.length) Logger.emit(colors.gray(`       … ${m.combinations - m.samples.length} more`));
         }
 
         if (a.topology.cycles.length) {
@@ -464,34 +497,43 @@ class Analyzer {
         }
 
         if (a.deadSteps.length) {
-            console.log('');
-            Logger.warn(`${a.deadSteps.length} step(s) can never affect the result:`);
+            const unreachable = a.deadSteps.filter((d) => d.kind === 'unreachable').length;
+            const alwaysFails = a.deadSteps.length - unreachable;
+            Logger.emit('');
+            // Two counts, because the two kinds are two different problems. One
+            // sentence claimed all of them "can never affect the result", which
+            // is true of the unreachable ones and exactly backwards for the step
+            // that fails: failing the job is precisely how it affects the result.
+            const counts = [];
+            if (alwaysFails) counts.push(`${alwaysFails} step(s) always exit non-zero`);
+            if (unreachable) counts.push(`${unreachable} step(s) can never run`);
+            Logger.warn(`${counts.join(' and ')}:`);
             for (const d of a.deadSteps) {
-                console.log(`   ${colors.gray('•')} ${colors.bright(d.jobId)} → ${d.step} ${colors.gray(`— ${d.reason}`)}`);
+                Logger.emit(`   ${colors.gray('•')} ${colors.bright(d.jobId)} → ${d.step} ${colors.gray(`— ${d.reason}`)}`);
             }
         }
 
         if (a.duplicateSteps.length) {
-            console.log('');
+            Logger.emit('');
             Logger.warn(`${a.duplicateSteps.length} duplicated script block(s):`);
             for (const d of a.duplicateSteps) {
-                console.log(`   ${colors.gray('•')} ${colors.gray(d.preview)} ${colors.gray(`in ${d.jobs.join(', ')}`)}`);
-                console.log(`     ${colors.gray('↳')} ${colors.gray(d.fix)}`);
+                Logger.emit(`   ${colors.gray('•')} ${colors.gray(d.preview)} ${colors.gray(`in ${d.jobs.join(', ')}`)}`);
+                Logger.emit(`     ${colors.gray('↳')} ${colors.gray(d.fix)}`);
             }
         }
 
         if (a.unusedOutputs.length) {
-            console.log('');
+            Logger.emit('');
             for (const u of a.unusedOutputs) {
                 Logger.note(`output ${colors.gray(`${u.jobId}.${u.name}`)} is never consumed ${colors.gray(`— ${u.reason}`)}`);
             }
         }
 
         if (a.redundantJobs && a.redundantJobs.length) {
-            console.log('');
+            Logger.emit('');
             for (const r of a.redundantJobs) {
                 Logger.warn(`jobs ${colors.bright(r.jobs.join(' and '))} are identical (${r.steps} step(s) each)`);
-                console.log(`     ${colors.gray('↳')} ${colors.gray(r.fix)}`);
+                Logger.emit(`     ${colors.gray('↳')} ${colors.gray(r.fix)}`);
             }
         }
 
@@ -512,32 +554,72 @@ class Analyzer {
             Logger.warn(c);
         }
 
-        console.log(colors.gray + '─'.repeat(64) + colors.reset);
+        Logger.emit(colors.gray + '─'.repeat(64) + colors.reset);
     }
 }
 
 /** Two jobs in the same non-cancelling group block each other. */
-function findConcurrencyConflicts(groups, workflowConcurrency) {
+/**
+ * What a shared concurrency group actually does to a run.
+ *
+ * GitHub runs one job per group at a time, and `cancel-in-progress` decides what
+ * happens to the *newcomer*, not to the running job:
+ *
+ *   true    — the newly queued job **cancels the one already running**
+ *   false   — the running job finishes, but any job still *pending* in the
+ *             group is dropped so that only the newest one goes on
+ *   unset   — the same as false
+ *
+ * The previous version of this read `cancel-in-progress` off the group *name*,
+ * which is a string and can never contain it, so the test was always false and
+ * every group was reported with `cancel-in-progress unset — a waiting job
+ * cancels the running one`. That was wrong in both directions: with `true` the
+ * newcomer cancels the runner, and with `false` — the setting that exists
+ * precisely to stop that — nothing running is cancelled at all. Advice that
+ * tells you your safe workflow is unsafe is worse than no advice, so the
+ * behaviour is now read off the job and each case is described in its own words.
+ */
+function findConcurrencyConflicts(groups, workflowConcurrency, jobs) {
     const conflicts = [];
     const workflowGroup = typeof workflowConcurrency === 'string'
         ? workflowConcurrency
         : (workflowConcurrency && workflowConcurrency.group);
-    if (workflowGroup) {
-        for (const [group, jobs] of groups) {
-            if (group !== workflowGroup) continue;
-            if (jobs.length > 1) {
-                conflicts.push(
-                    `jobs ${jobs.join(' and ')} share workflow concurrency group "${group}" — only one can run at a time`
-                );
-            }
-        }
-    }
-    for (const [group, jobs] of groups) {
-        if (jobs.length > 1) {
-            const rx = /cancel-in-progress\s*:\s*(false|\$\{\{)/;
+
+    /** `cancel-in-progress` as written on one job, or `undefined`. */
+    const settingOf = (jobId) => {
+        const value = jobs[jobId] && jobs[jobId].concurrency;
+        if (!value || typeof value === 'string') return undefined;
+        return value['cancel-in-progress'];
+    };
+
+    for (const [group, members] of groups) {
+        if (members.length < 2) continue;
+        const names = members.join(' and ');
+        if (workflowGroup && group === workflowGroup) {
+            // The workflow already serialises these, so the per-job setting has
+            // nothing left to decide. One message, not two.
             conflicts.push(
-                `jobs ${jobs.join(' and ')} share concurrency group "${group}"` +
-                (rx.test(JSON.stringify(group)) ? '' : ' with cancel-in-progress unset — a waiting job cancels the running one')
+                `jobs ${names} share the workflow-level concurrency group "${group}" — they run one at a time, in order`
+            );
+            continue;
+        }
+        // A matrix job expands, so a group holding one can hold many. The
+        // cancellation maths only bites once there is more than one of them.
+        const cancelling = members.filter((id) => settingOf(id) === true);
+        if (cancelling.length) {
+            conflicts.push(
+                `jobs ${names} share concurrency group "${group}" and ${cancelling.length === 1 ? 'one sets' : 'they set'} `
+                + '`cancel-in-progress: true` — a newer job cancels the one already running, so an earlier run can be killed mid-step'
+            );
+        } else if (members.some((id) => settingOf(id) === undefined)) {
+            conflicts.push(
+                `jobs ${names} share concurrency group "${group}" without cancel-in-progress — `
+                + 'they run one at a time, and a pending job is dropped in favour of the newest'
+            );
+        } else {
+            conflicts.push(
+                `jobs ${names} share concurrency group "${group}" with cancel-in-progress: false — `
+                + 'they run one at a time, which costs wall clock if they could have overlapped'
             );
         }
     }
