@@ -79,6 +79,8 @@ combination. See [sandbox.md](./sandbox.md).
 | `--format <list>` | `json,markdown,html,junit` (default: all four) |
 | `--json [path]` | write the run summary as JSON |
 | `--no-annotations` | do not emit `::error` / `::warning` workflow commands |
+| `--allow-download` | install a runtime from nodejs.org when the workflow needs a version this machine lacks |
+| `--deny-download` | never install a runtime; report the requested version and carry on with the local one |
 | `--profile` | show the timing table and the cost projection |
 
 **Exit code:** `0` when every job succeeded, `1` when any step failed, and `7`
@@ -96,6 +98,17 @@ aeroci run --dry-run                        # what would run, and why
 `--dry-run` resolves expressions, the job graph and matrix expansion, then
 stops. It is the fast way to see what a workflow *would* do — including which
 steps a failing dependency would skip — without spending the time.
+
+### Download consent
+
+`--allow-download` and `--deny-download` only matter when a workflow uses
+`actions/setup-node` for a version this machine does not already have. They
+answer for that one run and never write to `.aeroci.json`; with neither, the
+recorded `toolchain.allowDownload` is used, and failing that a terminal is asked
+once and the answer is saved. A run with no terminal downloads nothing.
+
+Passing one in CI is the right move — it is explicit, and it leaves no trace in
+the repository. See [Toolchains](./features/actions.md#toolchains).
 
 ---
 

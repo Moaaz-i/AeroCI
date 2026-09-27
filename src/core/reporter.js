@@ -127,6 +127,19 @@ class Reporter {
         return this.steps.filter((s) => s.status === STATUS.SKIPPED || s.status === STATUS.CANCELLED);
     }
     get notSimulatedSteps() { return this.steps.filter((s) => s.notSimulated); }
+    /**
+     * Steps that passed and still said something.
+     *
+     * A failed step already lists its warnings under Failures, so this is only
+     * the passing ones. They need a home of their own: `setup-node` reporting
+     * that the job could not get the Node it asked for, and then passing, is
+     * precisely the case a report exists to catch — and a markdown report that
+     * dropped it would make the substitution invisible to anyone reading the
+     * file rather than watching the terminal.
+     */
+    get warnedSteps() {
+        return this.steps.filter((s) => s.warnings.length && !FAILED_STATUSES.has(s.status));
+    }
     get totalDurationMs() { return this.steps.reduce((sum, s) => sum + s.durationMs, 0); }
     get status() { return this.failedSteps.length ? STATUS.FAILURE : STATUS.SUCCESS; }
 
@@ -170,6 +183,11 @@ class Reporter {
         md.push(`| started | ${this.startTime} |`);
         md.push(`| wall clock | ${formatDuration(this.endTime ? Date.parse(this.endTime) - Date.parse(this.startTime) : 0)} |`);
         md.push(`| steps | ${this.passedSteps.length} passed · ${this.failedSteps.length} failed · ${this.skippedSteps.length} skipped |`);
+        // In the summary table, not only in a section further down: a green run
+        // with a substitution in it should not need scrolling to discover.
+        if (this.warnedSteps.length) {
+            md.push(`| warnings | ${this.warnedSteps.length} step(s) passed with a warning — see below |`);
+        }
         md.push('');
 
         md.push('## Steps', '');
@@ -179,6 +197,16 @@ class Reporter {
                 + `| ${STATUS_LABEL[step.status]} | ${formatDuration(step.durationMs)} |`);
         }
         md.push('');
+
+        if (this.warnedSteps.length) {
+            md.push('## Warnings', '');
+            md.push('These steps passed, but said something worth reading:', '');
+            for (const step of this.warnedSteps) {
+                md.push(`- \`${step.jobId}\` > ${mdCell(step.stepName)}`);
+                for (const w of step.warnings) md.push(`  - ${mdCell(w)}`);
+            }
+            md.push('');
+        }
 
         if (this.notSimulatedSteps.length) {
             md.push('## Not simulated', '');

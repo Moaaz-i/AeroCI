@@ -6,8 +6,10 @@
  * make a workflow "pass" locally while failing on the runner.
  */
 
+const fs = require('fs');
 const { suite, test, assert } = require('./harness');
 const { resolveShell, defaultShellKeyword, runnerEnvironment, which, isWindows } = require('../src/core/shell');
+const { cacheRoot } = require('../src/core/toolchain');
 
 suite('shell · the default', () => {
     test('the default keyword matches the platform', () => {
@@ -147,7 +149,15 @@ suite('shell · the runner environment', () => {
         }
     });
 
-    test('the tool cache points at the hosted-runner location', () => {
-        assert.strictEqual(runnerEnvironment().RUNNER_TOOL_CACHE, '/opt/hostedtoolcache');
+    test('the tool cache points at a directory that exists here', () => {
+        // It used to assert the literal '/opt/hostedtoolcache', which is a path
+        // on a Microsoft-hosted runner and on no machine a developer owns. The
+        // point of the value is that a step can write to it, so that is what is
+        // now asserted: the real cache, and it is there.
+        const cache = runnerEnvironment().RUNNER_TOOL_CACHE;
+        assert.strictEqual(cache, cacheRoot());
+        assert.notStrictEqual(cache, '/opt/hostedtoolcache');
+        assert.ok(fs.existsSync(cacheRoot()) || fs.mkdirSync(cacheRoot(), { recursive: true }) !== undefined,
+            'the tool cache directory should be creatable');
     });
 });

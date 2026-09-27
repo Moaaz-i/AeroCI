@@ -170,14 +170,18 @@ function isExecutableFile(p) {
 
 /** Environment additions every GitHub-hosted runner exports. */
 function runnerEnvironment() {
+    // The real tool cache, not /opt/hostedtoolcache: that path exists on a
+    // Microsoft-hosted runner and nowhere else, so on a laptop it named a
+    // directory that had never been created.
+    const toolCache = require('./toolchain').cacheRoot();
     const base = {
-        AGENT_TOOLSDIRECTORY: '/opt/hostedtoolcache',
+        AGENT_TOOLSDIRECTORY: toolCache,
         GITHUB_PATH: '',
         GITHUB_ENV: '',
         GITHUB_OUTPUT: '',
         GITHUB_STATE: '',
         GITHUB_STEP_SUMMARY: '',
-        RUNNER_TOOL_CACHE: '/opt/hostedtoolcache',
+        RUNNER_TOOL_CACHE: toolCache,
         ImageOS: isWindows ? 'windows22' : (os.release() || 'linux'),
         ImageVersion: 'local'
     };

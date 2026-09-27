@@ -39,6 +39,15 @@ const DEFAULTS = {
         exclude: ['.git', 'node_modules', '.aeroci-artifacts', '.next', 'dist', 'build',
                   'target', 'vendor', '.venv', '__pycache__', 'coverage', '.env'],
         keep: false           // keep the sandbox after the run (debugging)
+    },
+    toolchain: {
+        // Downloading a runtime (Node and friends) is the one thing AeroCI does
+        // that reaches the network during a run, so it never happens on its own.
+        // null means the user has not been asked yet; the first time a workflow
+        // needs a version this machine does not have, AeroCI asks once and
+        // records the answer here. `--allow-download` / `--no-download` override
+        // it for a single run without touching this file.
+        allowDownload: null
     }
 };
 
@@ -97,6 +106,39 @@ class Config {
     get runner() { return this.data.runner || DEFAULTS.runner; }
 
     get sandbox() { return this.data.sandbox || DEFAULTS.sandbox; }
+
+    get toolchain() { return this.data.toolchain || DEFAULTS.toolchain; }
+
+    /**
+     * Whether a runtime may be downloaded, or null when nobody has decided yet.
+     * @returns {boolean|null}
+     */
+    get allowDownload() {
+        const value = this.toolchain.allowDownload;
+        return value === true || value === false ? value : null;
+    }
+
+    /**
+     * Record the answer to "may AeroCI download a runtime?" so the question is
+     * asked once. The rest of the file is preserved: this rewrites the whole
+     * document, so a user's own keys and comments' neighbours must survive.
+     *
+     * A file that cannot be written is not an error the run should die on — the
+     * answer is still in effect for this run.
+     *
+     * @param {boolean} allowed
+     * @returns {boolean} whether it reached disk
+     */
+    saveAllowDownload(allowed) {
+        this.data.toolchain = { ...this.toolchain, allowDownload: !!allowed };
+        try {
+            fs.writeFileSync(this.path, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8');
+            return true;
+        } catch (err) {
+            this.errors.push(`could not save ${CONFIG_NAME}: ${err.message}`);
+            return false;
+        }
+    }
 
     get vars() { return isPlainObject(this.data.vars) ? this.data.vars : {}; }
 

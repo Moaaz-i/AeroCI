@@ -19,6 +19,7 @@ const path = require('path');
 const { Logger, colors } = require('../utils/logger');
 const { Engine, STATUS, FAILED_STATUSES } = require('./engine');
 const { loadConfig } = require('./config');
+const { resolveConsent } = require('./toolchain');
 const { Profiler } = require('./profiler');
 const { Reporter } = require('./reporter');
 const { Debugger } = require('./debugger');
@@ -127,6 +128,11 @@ class Runner {
 
         for (const error of config.errors) Logger.warn(error);
 
+        // Settled before any job starts, so the "may I download a runtime?"
+        // question can never interrupt a run halfway through and land in the
+        // middle of a step's output.
+        const allowDownload = await resolveConsent(config, { explicit: options.allowDownload });
+
         const files = resolveWorkflowFiles(target, cwd, config.workflowGlobs);
         if (files.length === 0) {
             Logger.error(`No workflow files found${target ? ` for "${target}"` : ''}.`);
@@ -158,6 +164,7 @@ class Runner {
             strictSecrets: config.strictSecrets,
             stepTimeoutMinutes: options.stepTimeout || config.runner.timeoutMinutes || 10,
             maxOutputLines: config.runner.maxOutputLines || 200,
+            allowDownload,
             keepSandbox: !!options.keepSandbox
         });
 

@@ -43,6 +43,12 @@ class Sandbox {
     constructor(projectRoot, options = {}) {
         this.projectRoot = projectRoot;
         this.exclude = new Set(options.exclude || []);
+        // Absolute paths refused at any depth. A name list cannot express this:
+        // the tool cache is wherever `AERO_TOOLCACHE` or the home directory puts
+        // it, and if it happens to sit inside the project then copying it would
+        // clone forty megabytes of Node into a sandbox that is about to be
+        // deleted — on every single run.
+        this.excludePaths = new Set((options.excludePaths || []).map((p) => path.resolve(p)));
         this.mode = options.mode === 'link' ? 'link' : 'copy';
         this.keep = !!options.keep;
         this.dir = null;
@@ -96,6 +102,20 @@ class Sandbox {
         return this.exclude.has(name);
     }
 
+    /**
+     * Is this absolute path the excluded one, inside it, or on the way to it?
+     * All three must refuse, or the copy would still walk the whole tree.
+     */
+    _excludedPath(absolute) {
+        const resolved = path.resolve(absolute);
+        for (const excluded of this.excludePaths) {
+            if (resolved === excluded) return true;
+            if (resolved.startsWith(excluded + path.sep)) return true;
+            if (excluded.startsWith(resolved + path.sep)) return true;
+        }
+        return false;
+    }
+
     _copyInto(src, dest, depth) {
         let entries;
         try {
@@ -106,6 +126,10 @@ class Sandbox {
         }
 
         for (const entry of entries) {
+            if (this._excludedPath(path.join(src, entry.name))) {
+                this.stats.skipped++;
+                continue;
+            }
             if (this._excluded(entry.name)) {
                 // The one thing `mode: 'link'` changes: a skipped entry becomes
                 // a link to the real one. It is opt-in because it is the only

@@ -24,6 +24,7 @@ const { Sandbox } = require('./sandbox');
 const { loadEnvFile } = require('./secrets');
 const { readGitState, buildEventPayload, buildGithubContext } = require('./event');
 const { loadConfig } = require('./config');
+const { cacheRoot } = require('./toolchain');
 const { VERSION } = require('../version');
 
 /** GitHub's own default shell per platform. */
@@ -64,6 +65,7 @@ class Debugger {
         try {
             sandbox = Sandbox.create(projectRoot, {
                 exclude: config.sandboxExcludes,
+                excludePaths: [cacheRoot()],
                 mode: config.sandbox.mode,
                 keep: !!options.keep
             });
@@ -109,7 +111,11 @@ class Debugger {
             fs.writeFileSync(files[name], '', 'utf8');
         }
         const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'aeroci-debug-'));
-        const toolCache = path.join(workspace, '.aeroci', 'tool-cache');
+        // The real tool cache, not a folder inside the sandbox. A cache that dies
+        // with the sandbox is a cache nobody can use: this used to point at
+        // <workspace>/.aeroci/tool-cache, a throwaway copy, so anything a debug
+        // session put there was gone before the next run.
+        const toolCache = cacheRoot();
         fs.mkdirSync(toolCache, { recursive: true });
 
         const env = {

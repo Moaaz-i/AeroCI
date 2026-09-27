@@ -180,6 +180,62 @@ suite('reporter · XML is well formed', () => {
     });
 });
 
+suite('reporter · a passing step that warned is not reported as clean', () => {
+    // The case this exists for: setup-node could not install the Node the
+    // workflow asked for, said so, and the job passed anyway. The markdown used
+    // to print warnings for failed steps only, so the substitution was in the
+    // terminal and in the HTML but nowhere in the file a person actually files.
+    const SUBSTITUTION = '⚠ Node 18 was requested but downloading Node 18.20.8 was not permitted — Node 26.9.0 is used instead';
+
+    test('a warning on a passing step reaches the markdown', () => {
+        const r = reporter([
+            { jobId: 'build', stepName: 'actions/setup-node@v4', exitCode: 0, warnings: [SUBSTITUTION] }
+        ]);
+        const out = r.generateMarkdown();
+        assert.ok(out.includes(SUBSTITUTION), 'the substitution is missing from the markdown');
+        assert.ok(out.includes('## Warnings'), 'there is no warnings section');
+    });
+
+    test('the summary table says so without needing a scroll', () => {
+        const r = reporter([
+            { jobId: 'build', stepName: 'actions/setup-node@v4', exitCode: 0, warnings: [SUBSTITUTION] }
+        ]);
+        const out = r.generateMarkdown();
+        const table = out.slice(0, out.indexOf('## Steps'));
+        assert.ok(/\| warnings \|/.test(table), 'the header table does not mention the warning');
+    });
+
+    test('a failed step is not listed twice', () => {
+        // Failed steps already print their warnings under Failures; repeating
+        // them in a second section would read as two separate problems.
+        const r = reporter([
+            { jobId: 'build', stepName: 'test', exitCode: 1, errors: ['boom'], warnings: ['careful'] }
+        ]);
+        const out = r.generateMarkdown();
+        assert.strictEqual(r.warnedSteps.length, 0);
+        assert.ok(!out.includes('## Warnings'));
+        assert.strictEqual(out.split('careful').length - 1, 1, 'the warning is printed more than once');
+    });
+
+    test('a clean run has no warnings section at all', () => {
+        const r = reporter([{ jobId: 'build', stepName: 'test', exitCode: 0 }]);
+        const out = r.generateMarkdown();
+        assert.ok(!out.includes('## Warnings'));
+        assert.ok(!/\| warnings \|/.test(out));
+    });
+
+    test('every format that can carry it does', () => {
+        const r = reporter([
+            { jobId: 'build', stepName: 'actions/setup-node@v4', exitCode: 0, warnings: [SUBSTITUTION] }
+        ]);
+        assert.ok(r.generateMarkdown().includes(SUBSTITUTION), 'markdown');
+        assert.ok(r.generateHTML().includes(SUBSTITUTION), 'html');
+        assert.ok(r.generateJSON().includes(SUBSTITUTION), 'json');
+        // junit has nowhere to put a note on a test that passed, and the run
+        // summary is aggregate by design; the two that can say it, do.
+    });
+});
+
 suite('reporter · HTML is safe to open', () => {
     test('a step name with markup is escaped', () => {
         const r = reporter([{ jobId: 'j', stepName: '<img src=x onerror=alert(1)>' }]);

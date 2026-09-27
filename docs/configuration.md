@@ -126,6 +126,37 @@ and says so at the start of the run.
 
 ---
 
+## `toolchain`
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `allowDownload` | boolean \| null | `null` | Whether `actions/setup-node` may install a runtime from the network. `null` means nobody has been asked yet. |
+
+```json
+{
+  "toolchain": {
+    "allowDownload": true
+  }
+}
+```
+
+`null` is the default and it is not `false` on purpose — it means *undecided*.
+The first time a workflow needs a Node version this machine does not have,
+AeroCI asks, and records the answer here. After that it stops asking.
+
+`--allow-download` and `--deny-download` override this for a single run and do
+**not** write to the file. An explicit flag is a decision about this run, and
+quietly rewriting somebody's project file because they passed a flag would be a
+side effect they never asked for.
+
+The cache itself is not configured here: it lives at
+`~/.aeroci/toolcache` and is shared by every project. `AERO_TOOLCACHE` moves it,
+which is what the test suite uses to stay out of your home directory. The
+sandbox never copies it, even if you point it inside the project. See
+[Toolchains](./features/actions.md#toolchains).
+
+---
+
 ## What is not configurable
 
 Not every knob is worth having, and a few plausible ones were left out on

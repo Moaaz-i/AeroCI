@@ -29,6 +29,7 @@ const { Sandbox } = require('./sandbox');
 const { ArtifactStore } = require('./artifacts');
 const { FileCommandSet } = require('./action-files');
 const { ActionSimulators, MATCHERS } = require('./action-simulators');
+const { cacheRoot } = require('./toolchain');
 const { parseLocalAction, entryExists } = require('./local-action');
 const { readGitState, buildEventPayload, buildGithubContext } = require('./event');
 const expressions = require('./expressions');
@@ -75,6 +76,10 @@ class Engine {
         this.unmaskSecrets = options.unmaskSecrets ?? process.env.AERO_UNMASK_SECRETS === '1';
         this.onStepStart = options.onStepStart || null;
         this.onStepEnd = options.onStepEnd || null;
+        // Whether `actions/setup-*` may install a runtime from the network.
+        // `null` is the honest default: the question is asked once, by the CLI,
+        // and until it is answered nothing is downloaded.
+        this.allowDownload = options.allowDownload === true;
         // Per-workflow wiring, replaced for every file.
         this.workspace = null;
         this.simulators = null;
@@ -376,7 +381,8 @@ class Engine {
                         artifacts,
                         cacheDir,
                         eventPath,
-                        repo: gitState.repository
+                        repo: gitState.repository,
+                        toolchain: { allowDownload: this.allowDownload }
                     });
 
                     instance = await this._runJobInstance({ jobId, job, ctx });
@@ -517,7 +523,7 @@ class Engine {
             os: RUNNER_OS,
             arch: process.arch === 'arm64' ? 'ARM64' : 'X64',
             temp: sandbox.resolve('_temp'),
-            tool_cache: path.join(os.homedir(), '.aeroci', 'toolcache'),
+            tool_cache: cacheRoot(),
             debug: this.debug ? '1' : '',
             environment: 'aeroci'
         };
@@ -634,6 +640,7 @@ class Engine {
         // counted the wrong number of paths. One list, not three.
         return Sandbox.create(this.cwd, {
             exclude: cfg ? cfg.sandboxExcludes : [...DEFAULTS.sandbox.exclude],
+            excludePaths: [cacheRoot()],
             keep: this.options.keepSandbox,
             mode: cfg ? cfg.sandbox.mode : DEFAULTS.sandbox.mode
         });

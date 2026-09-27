@@ -232,6 +232,14 @@ Linux will fail locally rather than pass by accident.
 `GITHUB_WORKFLOW` and `github.workflow` are the workflow's `name:`, falling
 back to the file name when it has none — the same as GitHub.
 
+`RUNNER_TOOL_CACHE` is a real directory outside the sandbox, and it holds
+something. This used to be a path that had never been created: the tool cache
+lived inside the sandbox copy, which is deleted at the end of every run, so
+anything put there was gone before the next one. `actions/setup-node` now
+installs into it for real — see
+[Toolchains](./features/actions.md#toolchains). Because it is outside the
+sandbox, the sandbox copy never includes it.
+
 ### When there is no git repository
 
 Outside a repository there is no commit, so `GITHUB_SHA` is 40 zeros and

@@ -10,6 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const { which } = require('./shell');
+const { ensureNode } = require('./toolchain');
 
 /** @typedef {{success:boolean, outputs?:object, notSimulated?:boolean, messages?:string[]}} SimResult */
 
@@ -31,12 +32,16 @@ function majorOf(versionSpec) {
 }
 
 class ActionSimulators {
-    constructor({ workspace, artifacts, cacheDir, eventPath, repo = 'local/aeroci-simulation' }) {
+    constructor({ workspace, artifacts, cacheDir, eventPath, repo = 'local/aeroci-simulation', toolchain = null }) {
         this.workspace = workspace;
         this.artifacts = artifacts;
         this.cacheDir = cacheDir;
         this.eventPath = eventPath;
         this.repo = repo;
+        // { allowDownload: boolean|null } — whether installing a runtime may
+        // reach the network. null means the question is still open and the
+        // toolchain must not download.
+        this.toolchain = toolchain;
     }
 
     // ── actions/checkout ─────────────────────────────────────────────────────
@@ -78,17 +83,108 @@ class ActionSimulators {
     }
 
     // ── actions/setup-node ───────────────────────────────────────────────────
-    async setupNode(step) {
+    /**
+     * Read the version the workflow asked for.
+     *
+     * `node-version-file` wins over `node-version`, matching setup-node. The file
+     * is read from the workspace, so a checked-in `.nvmrc` is honoured. A file
+     * that is missing is a real problem and says so rather than guessing.
+     *
+     * @returns {Promise<string>} '' when nothing was requested
+     */
+    async _requestedNodeVersion(with_, messages) {
+        const file = with_['node-version-file'];
+        if (file) {
+            const candidates = [file];
+            // setup-node falls back to these names when given a bare directory.
+            if (!path.extname(file)) candidates.push(...['.nvmrc', '.node-version'].map((n) => path.join(file, n)));
+            for (const candidate of candidates) {
+                try {
+                    const text = fs.readFileSync(path.join(this.workspace, candidate), 'utf8');
+                    const first = text.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+                    if (first) return first;
+                } catch (_) { /* try the next candidate */ }
+            }
+            messages.push(`⚠ node-version-file "${file}" was not found or is empty — no version was read`);
+            return '';
+        }
+        return String(with_['node-version'] || '');
+    }
+
+    /**
+     * Say why the host runtime is being used instead of the requested one.
+     *
+     * The substitution is the whole story, so it is stated in one line with both
+     * versions named, and the fix is a separate line so it does not dilute the
+     * warning in the report.
+     */
+    _nodeFallback(spec, reason, detail, host) {
+        const hints = {
+            denied: 'allow it for one run with `--allow-download`, or record the answer in .aeroci.json',
+            offline: 'Node\'s release index could not be reached; a later run with a network will install it',
+            'not-found': 'check the version against https://nodejs.org/dist/index.json',
+            'unsupported-spec': 'use a form setup-node understands, e.g. 18, 18.x, 18.20.4, lts/*, >=18 <21',
+            'unsupported-platform': 'no official build exists for this operating system and architecture',
+            'download-failed': 'the download or its checksum verification did not complete',
+            unusable: 'the downloaded build did not start, so it was not used'
+        };
+        return {
+            message: `⚠ Node ${spec} was requested but ${detail} — Node ${host} is used instead`,
+            hint: hints[reason] || null
+        };
+    }
+
+    /**
+     * Put the requested Node on PATH for the rest of the job.
+     *
+     * This is the only step that decides which interpreter the job's own `run:`
+     * steps execute, so it does the real work: resolve the spec against the
+     * official release index, install that exact build if the machine does not
+     * already have it, and prepend its `bin` to the job's PATH. A previous
+     * version of this step only compared numbers and then carried on with
+     * whatever Node the host had, so a job pinned to 18 could finish green on 26.
+     */
+    async setupNode(step, ctx) {
         const messages = [];
         const with_ = step.with || {};
-        const requested = String(with_['node-version'] || process.versions.node).replace(/^['"]|['"]$/g, '');
-        const local = process.versions.node;
-        const want = majorOf(requested), have = majorOf(local);
+        const host = process.versions.node;
+        const requested = await this._requestedNodeVersion(with_, messages);
 
-        if (want && have && want !== have) {
-            messages.push(`⚠ requested Node ${requested} but local Node is ${local} — the local runtime is used`);
+        let version = host;
+        let cacheHit = false;
+
+        if (requested) {
+            const consent = this.toolchain || {};
+            const result = await ensureNode(requested, {
+                allowDownload: consent.allowDownload === undefined ? null : consent.allowDownload,
+                onProgress: (percent) => this._onNodeDownloadProgress?.(percent)
+            });
+
+            if (result.ok) {
+                version = result.version;
+                cacheHit = result.source === 'cache';
+                if (result.bin && ctx && typeof ctx.addPath === 'function') {
+                    ctx.addPath(result.bin);
+                }
+                const codename = result.lts ? ` (${result.lts})` : '';
+                if (result.source === 'host') {
+                    messages.push(`Node.js v${version}${codename} — already installed and it is what "${result.spec}" resolves to`);
+                } else if (result.source === 'cache') {
+                    messages.push(`Node.js v${version}${codename} — from the tool cache at ${result.bin}`);
+                } else {
+                    messages.push(`Node.js v${version}${codename} — downloaded, checksum verified against nodejs.org`);
+                }
+                if (result.staleIndex) {
+                    messages.push('⚠ the Node release index used was a cached copy — the network was not reached for it');
+                }
+            } else {
+                const { message, hint } = this._nodeFallback(result.spec, result.reason, result.message, host);
+                messages.push(message);
+                if (hint) messages.push(`  ${hint}`);
+                version = host;
+            }
         } else {
-            messages.push(`Node.js ${local}`);
+            messages.push(`Node.js v${host} — no node-version was requested`);
         }
 
         if (with_['registry-url']) {
@@ -105,7 +201,7 @@ class ActionSimulators {
         }
         if (with_.cache) messages.push(`cache: ${with_.cache} (local cache store is simulated separately)`);
 
-        return { success: true, outputs: { 'cache-hit': String(false), 'node-version': local }, messages };
+        return { success: true, outputs: { 'cache-hit': String(cacheHit), 'node-version': version }, messages };
     }
 
     // ── generic setup-* runtimes ─────────────────────────────────────────────
@@ -494,7 +590,9 @@ function formatBytes(bytes) {
 /** Match a `uses:` string to a simulator, most specific first. */
 const MATCHERS = [
     ['actions/checkout', (s, c, ctx) => s.checkout(c, ctx)],
-    ['actions/setup-node', (s, c) => s.setupNode(c)],
+    // setup-node needs `ctx`: it is the step that puts the requested runtime on
+    // the job's PATH, which is exactly what core.addPath does on a real runner.
+    ['actions/setup-node', (s, c, ctx) => s.setupNode(c, ctx)],
     ['actions/setup-python', (s, c) => s.setupPython(c)],
     ['actions/setup-java', (s, c) => s.setupJava(c)],
     ['actions/setup-go', (s, c) => s.setupGo(c)],
