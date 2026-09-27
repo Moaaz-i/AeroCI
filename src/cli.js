@@ -102,11 +102,11 @@ program
         // a checker that reaches the network without being told to is a trap.
         const report = Checker.check(target, { network: !!options.network });
         if (options.security) {
-            console.log('');
+            Logger.emit('');
             Security.audit(target);
         }
         if (options.analyze) {
-            console.log('');
+            Logger.emit('');
             Analyzer.analyze(target);
         }
         // Errors fail the command; warnings are advisory and do not.
@@ -179,14 +179,19 @@ program
 
 program
     .command('analyze')
-    .description('workflow intelligence: graph, dead steps, duplicates, cost, longest chain')
+    .description('workflow structure: graph, dead steps, duplicates, unused outputs, matrix, complexity')
     .argument('[target]', 'file, directory or project root', DEFAULT_TARGET)
     .option('--json', 'print the analysis as JSON')
-    .option('--strict', 'exit non-zero when dead steps or unused outputs are found')
+    .option('--strict', 'exit non-zero on dead steps, duplicate steps, unused outputs, shell issues or redundant jobs')
     .action((target, options) => {
+        if (options.json) Logger.setStderr(true);
         Logger.banner();
-        const report = Analyzer.analyze(target);
-        if (options.json) console.log(JSON.stringify(report, null, 2));
+        // `--json` is a promise that stdout parses. Everything AeroCI says about
+        // its own progress moves to stderr so the JSON owns stdout — the banner,
+        // the tables, the per-workflow headers. One switch, so the next progress
+        // line someone adds cannot quietly break the pipe.
+        const report = Analyzer.analyze(target, { print: !options.json });
+        if (options.json) Logger.answer(report);
         // The complexity score is a number for comparing workflows, not a
         // verdict, so it never fails the command. Only real defects can.
         if (options.strict && report.defects) {
@@ -207,11 +212,16 @@ program
     .command('security')
     .description('audit for template injection, supply chain, token scope and exfiltration')
     .argument('[target]', 'file, directory or project root', DEFAULT_TARGET)
-    .option('--report [path]', 'write a markdown report', 'security-report.md')
+    .option('--report [path]', 'write a markdown report (default: security-report.md)')
     .option('--json', 'print findings as JSON instead of text')
     .action((target, options) => {
+        if (options.json) Logger.setStderr(true);
         Logger.banner();
         const { exitCode } = Security.audit(target, {
+            // No default on the option itself: with one, `!!options.report` was
+            // true for a bare `aeroci security`, so every audit wrote
+            // security-report.md into the caller's project whether they asked
+            // for a file or not.
             report: !!options.report,
             reportPath: typeof options.report === 'string' ? options.report : 'security-report.md',
             format: options.json ? 'json' : 'text'
@@ -239,7 +249,7 @@ program
             if (!doc) continue;
             const notes = Profiler.observations(doc, []);
             if (notes.length) {
-                console.log('');
+                Logger.emit('');
                 Logger.info(`Observations for ${path.relative(process.cwd(), file)}`);
                 Profiler.printObservations(notes);
             }
@@ -335,7 +345,7 @@ function rerenderLastRun(options) {
 
     Logger.info(`${index.workflows.length} workflow(s) recorded at ${index.generatedAt}`);
     Logger.metric('Exit code', String(index.exitCode ?? 'unknown'));
-    console.log('');
+    Logger.emit('');
 
     const outDir = path.resolve(process.cwd(), options.out || runDir);
     let rendered = 0;
@@ -359,7 +369,7 @@ function rerenderLastRun(options) {
     }
 
     if (rendered) {
-        console.log('');
+        Logger.emit('');
         Logger.metric('Re-rendered', `${rendered} workflow(s) → ${path.relative(process.cwd(), outDir) || outDir}`);
     }
     if (skipped) {
@@ -382,7 +392,7 @@ program
         const report = Versions.inspect(target);
         Versions.print(report);
         if (options.checkRemote) {
-            console.log('');
+            Logger.emit('');
             await Versions.checkRemote(report.references);
         }
         process.exitCode = report.exitCode;
@@ -407,6 +417,6 @@ program
 
 program.parseAsync(process.argv).catch((err) => {
     Logger.error(err && err.message ? err.message : String(err));
-    if (process.env.AEROCI_DEBUG) console.error(err && err.stack);
+    if (process.env.AEROCI_DEBUG) Logger.emitErr(err && err.stack);
     process.exitCode = 1;
 });

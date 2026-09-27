@@ -168,9 +168,7 @@ class Security {
         const unique = dedupe(findings);
         const repeats = summariseRepeats(unique);
         if (options.format === 'json') {
-            console.log(JSON.stringify({
-                generatedAt: new Date().toISOString(), findings: unique, repeats
-            }, null, 2));
+            Logger.answer({ generatedAt: new Date().toISOString(), findings: unique, repeats });
         } else {
             Security.print(unique);
         }
@@ -586,31 +584,31 @@ Security.print = function print(findings) {
     let lastFile = null;
     for (const finding of findings) {
         if (finding.file !== lastFile) {
-            if (lastFile !== null) console.log('');
-            console.log(`${colors.bright}${colors.cyan}🔒 ${finding.file}${colors.reset}`);
+            if (lastFile !== null) Logger.emit('');
+            Logger.emit(`${colors.bright}${colors.cyan}🔒 ${finding.file}${colors.reset}`);
             lastFile = finding.file;
         }
         const tag = LEVEL_COLOUR[finding.level](finding.level.toUpperCase().padEnd(8));
-        console.log(`  ${tag} ${colors.bright}${finding.title}${colors.reset}`);
-        if (finding.location) console.log(`             ${colors.gray}@ ${finding.location}${colors.reset}`);
-        if (finding.detail) console.log(`             ${colors.gray}${finding.detail}${colors.reset}`);
-        if (finding.fix) console.log(`             ${colors.green('fix')} ${finding.fix}`);
-        console.log(`             ${colors.gray}[${finding.rule}]${colors.reset}`);
+        Logger.emit(`  ${tag} ${colors.bright}${finding.title}${colors.reset}`);
+        if (finding.location) Logger.emit(`             ${colors.gray}@ ${finding.location}${colors.reset}`);
+        if (finding.detail) Logger.emit(`             ${colors.gray}${finding.detail}${colors.reset}`);
+        if (finding.fix) Logger.emit(`             ${colors.green('fix')} ${finding.fix}`);
+        Logger.emit(`             ${colors.gray}[${finding.rule}]${colors.reset}`);
     }
 
     const repeats = summariseRepeats(findings);
     if (repeats.length) {
-        console.log('');
+        Logger.emit('');
         Logger.note(`${repeats.length} finding(s) repeat — one change fixes all of them:`);
         for (const repeat of repeats) {
-            console.log(`   ${colors.gray('•')} ${colors.bright(repeat.count)}× ${repeat.title}`
+            Logger.emit(`   ${colors.gray('•')} ${colors.bright(repeat.count)}× ${repeat.title}`
                 + (repeat.fix ? ` ${colors.gray(`→ ${repeat.fix}`)}` : ''));
         }
     }
 
     const counts = countByLevel(findings);
-    console.log('');
-    console.log(`${colors.bright}Summary${colors.reset}  `
+    Logger.emit('');
+    Logger.emit(`${colors.bright}Summary${colors.reset}  `
         + LEVEL_ORDER.map((level) => `${counts[level] || 0} ${level}`).join(colors.gray(' · ')));
 };
 

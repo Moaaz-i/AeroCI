@@ -126,8 +126,18 @@ longest chain, and a complexity score with the penalties that produced it.
 
 | Flag | Effect |
 |------|--------|
-| `--json` | print the analysis as JSON |
-| `--strict` | exit non-zero when dead steps or unused outputs are found |
+| `--json` | print the analysis as JSON on stdout, and nothing else |
+| `--strict` | exit non-zero on dead steps, duplicate steps, unused outputs, shell issues or redundant jobs |
+
+The JSON is the whole `analyze` output, not a score: every workflow appears
+under `workflows` with its graph, findings, matrix expansion, concurrency, the
+longest chain, and its complexity breakdown. The three summary fields —
+`files`, `score`, `defects` — are there for the case where you only want the
+count. A target with no workflows in it reports `files: 0` and `score: null`,
+never a score of zero, which would read like a real measurement.
+
+See [`--json` and the streams](#--json-and-the-streams) for how it behaves when
+piped.
 
 ---
 
@@ -140,8 +150,14 @@ patterns.
 
 | Flag | Effect |
 |------|--------|
-| `--report [path]` | write a markdown report (default `security-report.md`) |
-| `--json` | print findings as JSON instead of text |
+| `--report [path]` | write a markdown report to `path` (default `security-report.md`) |
+| `--json` | print findings as JSON on stdout, and nothing else |
+
+`--report` writes a file only when you pass it. A bare `aeroci security` reads
+your workflows and leaves your project as it found it.
+
+See [`--json` and the streams](#--json-and-the-streams) for how it behaves when
+piped.
 
 ---
 
@@ -211,6 +227,37 @@ your workflow source on the network — `--host 0.0.0.0` is a deliberate act.
 
 ---
 
+## `--json` and the streams
+
+`aeroci analyze --json` and `aeroci security --json` write **only** the JSON to
+stdout. Everything else AeroCI has to say — the wordmark, `Analyzing 7 workflow
+file(s)…`, the per-workflow tables, the `Security report → …` notice — goes to
+stderr, where a terminal shows it and a pipe does not collect it.
+
+```console
+$ aeroci security --json | jq -r '.findings[] | "\(.level): \(.rule)"'
+medium: supply-chain
+medium: supply-chain
+medium: token-permissions
+
+$ aeroci analyze --json --strict | jq -r '.workflows[] | .file'
+.github/workflows/ci.yml
+.github/workflows/env.yml
+```
+
+Both of those list whatever the project actually contains — one line per
+finding, one per workflow — so the count is yours, not a number written here.
+
+Exit codes do not change. `--strict` still fails the run on real defects, and
+`security` still exits 1 on a critical or high finding, so `--json` composes
+with `&&` in a script.
+
+If you want the tables *and* the JSON, run the command twice. They are the same
+data; the text form is for reading and the JSON form is for a program, and
+putting both on one stream would serve neither.
+
+---
+
 ## Environment variables
 
 | Variable | Effect |
@@ -219,6 +266,7 @@ your workflow source on the network — `--host 0.0.0.0` is a deliberate act.
 | `AEROCI_HOST` | default bind address for `aeroci ui` |
 | `AEROCI_DEBUG` | print stack traces on failure |
 | `NO_COLOR` | disable colour |
+| `FORCE_COLOR` | keep colour when stdout is not a TTY |
 
 ---
 

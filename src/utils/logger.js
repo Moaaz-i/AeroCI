@@ -71,9 +71,36 @@ class Logger {
     static setQuiet(on) { this._quiet = !!on; }
     static get quiet() { return !!this._quiet; }
 
-    static emit(text) { if (!this._quiet) console.log(text); }
-    static emitErr(text) { if (!this._quiet) console.error(text); }
+    /**
+     * Reserve stdout for the answer and move everything else to stderr.
+     *
+     * Set by `--json`. The flag is a promise that `aeroci security --json | jq`
+     * works, and a promise kept by one call site at a time is a promise that
+     * works until someone adds a progress line. Every `Logger` call — the
+     * banner, "Analyzing 7 workflow file(s)…", the report notice — now leaves
+     * stdout the moment this is on, and the call sites do not each have to
+     * remember.
+     */
+    static setStderr(on) { this._stderr = !!on; }
+    static get stderr() { return !!this._stderr; }
 
+    static emit(text) { if (this._quiet) return; if (this._stderr) console.error(text); else console.log(text); }
+    static emitErr(text) { if (this._quiet) return; console.error(text); }
+
+    /**
+     * The machine-readable answer, on stdout, always.
+     *
+     * Not `emit`: `--json` turns on `setStderr`, so `emit` would send the very
+     * JSON it was asked to produce out of the pipe it was meant for. This is the
+     * one line that is data rather than commentary, and data goes where the
+     * caller is listening. It also prints when quiet is on, because a library
+     * consumer that asked for silence is not reading a CLI's stdout.
+     */
+    static answer(json) { process.stdout.write(`${JSON.stringify(json, null, 2)}\n`); }
+
+    /**
+     * The wordmark and version.
+     */
     static banner(subtitle = '') {
         const v = require('../version').banner;
         const art = [

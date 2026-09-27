@@ -28,6 +28,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// Used when `dispose` is called with no injected logger. Aliased so the
+// parameter of the same name cannot shadow the module binding.
+const defaults = require('../utils/logger');
+
 class Sandbox {
     /**
      * @param {string} projectRoot  directory to clone
@@ -193,10 +197,14 @@ class Sandbox {
      * @param {boolean}  [options.quiet]   suppress the removal notice
      */
     dispose({ log = null, Logger = null, colors = null, quiet = false } = {}) {
+        // The injected logger is what the caller wants its own output to obey;
+        // with none, fall back to the real one rather than to a raw write,
+        // which would print even when the caller asked for silence.
+        const out = Logger || defaults;
         if (!this.dir || this.keep) {
             if (this.keep) {
                 const msg = `Sandbox kept for inspection: ${this.dir}`;
-                log ? log(msg) : console.log(msg);
+                log ? log(msg) : out.emit(msg);
             }
             return false;
         }
