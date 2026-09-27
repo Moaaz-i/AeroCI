@@ -121,7 +121,7 @@ class Profiler {
         const max = sorted[0].durationMs;
         const shown = sorted.slice(0, top);
 
-        console.log(`\n${colors.bright}${colors.cyan}⏱  Slowest steps${colors.reset}`);
+        Logger.emit(`\n${colors.bright}${colors.cyan}⏱  Slowest steps${colors.reset}`);
         Logger.table(
             ['Job', 'Step', 'Time', 'Share', ''],
             shown.map((run) => {
@@ -172,12 +172,12 @@ class Profiler {
         const totalMinutes = rows.reduce((s, r) => s + r.minutes, 0);
         const totalCost = rows.reduce((s, r) => s + r.cost, 0);
 
-        console.log(`\n${colors.bright}💵 Cost on a GitHub-hosted ${runner}${colors.reset}`);
+        Logger.emit(`\n${colors.bright}💵 Cost on a GitHub-hosted ${runner}${colors.reset}`);
         Logger.metric('Measured step time', formatDuration(totalMs));
         Logger.metric('Billable minutes', `${totalMinutes} ${colors.gray(`(each job rounds up to 1 minute · $${price}/min)`)}`);
         Logger.metric('Projected cost', `$${totalCost.toFixed(3)}`);
-        console.log(colors.gray(`     This is a projection from the durations measured above, not a measurement of a `));
-        console.log(colors.gray(`     hosted run. Real time is usually higher, so treat it as a lower bound.`));
+        Logger.emit(colors.gray(`     This is a projection from the durations measured above, not a measurement of a `));
+        Logger.emit(colors.gray(`     hosted run. Real time is usually higher, so treat it as a lower bound.`));
         void rows;
     }
 
@@ -185,7 +185,7 @@ class Profiler {
         const trend = Profiler.trends(this.workflowName, { historyFile: this.historyFile });
         if (!trend) return;
 
-        console.log(`\n${colors.bright}${colors.magenta}📊 Compared with your last ${trend.baseline.runs} run(s)${colors.reset}`);
+        Logger.emit(`\n${colors.bright}${colors.magenta}📊 Compared with your last ${trend.baseline.runs} run(s)${colors.reset}`);
         Logger.metric('This run', formatDuration(trend.latest));
         Logger.metric('Average before', `${formatDuration(trend.baseline.average)} ${colors.gray('(median ' + formatDuration(trend.baseline.median) + ')')}`);
         const delta = trend.latest - trend.baseline.median;
@@ -208,7 +208,7 @@ class Profiler {
             if (ratio < 0.8) return '▅';
             return '▇';
         }).join('');
-        console.log(`  ${colors.cyan(spark)} ${colors.gray(`${trend.history.length} most recent runs`)}`);
+        Logger.emit(`  ${colors.cyan(spark)} ${colors.gray(`${trend.history.length} most recent runs`)}`);
     }
 
     // ── observations (not a score) ───────────────────────────────────────────
@@ -273,10 +273,10 @@ class Profiler {
 
     static printObservations(notes) {
         if (!notes || notes.length === 0) return;
-        console.log(`\n${colors.bright}${colors.cyan}🔎 Worth knowing${colors.reset}`);
+        Logger.emit(`\n${colors.bright}${colors.cyan}🔎 Worth knowing${colors.reset}`);
         for (const note of notes) {
             const tag = note.level === 'warn' ? colors.yellow('!') : colors.gray('·');
-            console.log(`  ${tag} ${note.text}`);
+            Logger.emit(`  ${tag} ${note.text}`);
         }
     }
 

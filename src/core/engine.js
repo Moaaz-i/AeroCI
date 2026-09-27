@@ -229,7 +229,7 @@ class Engine {
         if (envLoaded.exists) {
             Logger.metric('Secrets file', `${path.relative(this.cwd, envFile) || '.env'} (${Object.keys(envLoaded.values).length} value(s))`);
         }
-        console.log(colors.gray + '─'.repeat(64) + colors.reset);
+        Logger.emit(colors.gray + '─'.repeat(64) + colors.reset);
 
         const { order, cycles, deps } = orderJobs(doc.jobs || {});
         if (cycles.length) {

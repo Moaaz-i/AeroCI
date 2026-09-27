@@ -381,14 +381,14 @@ ${rows}
                 const message = step.errors[0]
                     || `job "${step.jobId}" step "${step.stepName}" failed`
                         + (step.exitCode === null ? '' : ` with exit code ${step.exitCode}`);
-                console.log(`::error file=${file},title=${title}::${encode(message)}`);
+                Logger.emit(`::error file=${file},title=${title}::${encode(message)}`);
             } else if (step.durationMs > slowStepMs) {
-                console.log(`::warning file=${file},title=${title}::`
+                Logger.emit(`::warning file=${file},title=${title}::`
                     + `${encode(`took ${(step.durationMs / 1000).toFixed(1)}s`)}`);
             }
         }
         for (const step of this.notSimulatedSteps) {
-            console.log(`::warning file=${file},title=${encode(step.stepName)}::`
+            Logger.emit(`::warning file=${file},title=${encode(step.stepName)}::`
                 + `${encode(`not simulated locally${step.uses ? ` (${step.uses})` : ''}`)}`);
         }
     }
@@ -422,8 +422,8 @@ ${rows}
             return [];
         }
 
-        console.log(`\n${colors.bright}${colors.red}Reproduce a failure${colors.reset}`);
-        console.log(colors.gray('Each command runs the failing step in the same shell AeroCI used:') + '\n');
+        Logger.emit(`\n${colors.bright}${colors.red}Reproduce a failure${colors.reset}`);
+        Logger.emit(colors.gray('Each command runs the failing step in the same shell AeroCI used:') + '\n');
 
         const commands = [];
         let index = 0;
@@ -434,10 +434,10 @@ ${rows}
                 ? `${first.jobId} > "${first.stepName}"`
                 : `${steps.map((s) => s.jobId).join(', ')} (${steps.length} steps)`;
 
-            console.log(`  ${colors.yellow(`# ${index}`)} ${colors.gray(where)}`);
-            if (sandbox) console.log(`  ${colors.gray(`# sandbox: ${sandbox}`)}`);
-            console.log(shellBlock(script));
-            console.log('');
+            Logger.emit(`  ${colors.yellow(`# ${index}`)} ${colors.gray(where)}`);
+            if (sandbox) Logger.emit(`  ${colors.gray(`# sandbox: ${sandbox}`)}`);
+            Logger.emit(shellBlock(script));
+            Logger.emit('');
             commands.push({ locations: steps.map((s) => `${s.jobId}/${s.stepName}`), script });
         }
         return commands;
@@ -500,7 +500,7 @@ ${rows}
         const report = (kind, what) => {
             changes.push({ kind, what });
             const tag = kind === 'added' ? colors.green('+') : kind === 'removed' ? colors.red('-') : colors.yellow('~');
-            console.log(`  ${tag} ${what}`);
+            Logger.emit(`  ${tag} ${what}`);
         };
 
         const triggersA = stableTriggers(a.on);
@@ -545,7 +545,7 @@ ${rows}
         if (changes.length === 0) {
             Logger.success('The two workflows are structurally identical.');
         } else {
-            console.log('');
+            Logger.emit('');
             Logger.metric('Changes', String(changes.length));
         }
         return { changes: changes.length, details: changes };
@@ -583,10 +583,10 @@ ${rows}
         const filled = Math.round((pct / 100) * 24);
         const bar = '█'.repeat(filled) + '░'.repeat(24 - filled);
 
-        console.log('');
+        Logger.emit('');
         Logger.metric('Step coverage', `${executed}/${expected} executed ${colors.gray(`(${pct}%)`)}`
             + (combinations ? colors.gray(` — ${declared} declared, ${combinations} matrix combination(s)`) : ''));
-        console.log(`  ${bar} ${colors.gray(`${pct}%`)}`);
+        Logger.emit(`  ${bar} ${colors.gray(`${pct}%`)}`);
 
         if (skipped.length) {
             const byGuard = skipped.filter((s) => /^if:/.test(s.reason || ''));

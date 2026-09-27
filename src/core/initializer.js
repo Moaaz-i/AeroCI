@@ -156,7 +156,7 @@ class Initializer {
             Logger.note(`Workflows found: ${existing.join(', ')}`);
         }
 
-        console.log(colors.gray + '─'.repeat(64) + colors.reset);
+        Logger.emit(colors.gray + '─'.repeat(64) + colors.reset);
         if (existing.length) {
             Logger.success('Ready. Next:');
             Logger.info(`  ${colors.cyan('aeroci check')}      audit the workflows for defects and missing secrets`);

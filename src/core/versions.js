@@ -141,7 +141,7 @@ class Versions {
             byAction.get(ref.action).push(ref);
         }
 
-        console.log(`${colors.bright}${colors.cyan}🔖 Action references${colors.reset}\n`);
+        Logger.emit(`${colors.bright}${colors.cyan}🔖 Action references${colors.reset}\n`);
         Logger.table(
             ['Action', 'Reference', 'Pinned as', 'Simulated', 'Used in'],
             [...byAction.entries()].map(([action, uses]) => {
@@ -166,7 +166,7 @@ class Versions {
             })
         );
 
-        console.log('');
+        Logger.emit('');
         Logger.metric('References', `${counts.total} in ${counts.unique} distinct action(s)`);
         Logger.metric('Pinned to a SHA', `${counts.sha} ${colors.gray('· the form that cannot change under you')}`);
         if (counts.tag) Logger.metric('Pinned to a tag', colors.yellow(`${counts.tag} ${colors.gray('· a tag can be repointed')}`));
@@ -179,7 +179,7 @@ class Versions {
         }
 
         if (counts.branch || counts.none) {
-            console.log('');
+            Logger.emit('');
             Logger.note('aeroci security explains what each pinning style means for supply-chain risk.');
         }
     }
@@ -199,9 +199,9 @@ class Versions {
             return [];
         }
 
-        console.log(`${colors.bright}🌐 Latest release per action${colors.reset}`);
+        Logger.emit(`${colors.bright}🌐 Latest release per action${colors.reset}`);
         Logger.note(`  fetching from api.github.com${token ? ' (authenticated)' : ' (unauthenticated — rate limited)'}`);
-        console.log('');
+        Logger.emit('');
 
         // Bounded concurrency rather than one request after another: with a dead
         // network a sequential loop is N × the timeout of silence, which reads
@@ -238,7 +238,7 @@ class Versions {
         });
 
         Logger.table(['Action', 'You use', 'Latest release'], rows);
-        console.log('');
+        Logger.emit('');
         Logger.note('A SHA-pinned action is shown as current because the tag number does not apply to it.');
         Logger.note('Fetched just now from the GitHub API; run it again later for a fresh answer.');
         return rows;

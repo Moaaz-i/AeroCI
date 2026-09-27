@@ -745,20 +745,20 @@ class Checker {
         let lastFile = null;
         for (const finding of findings) {
             if (finding.file !== lastFile) {
-                console.log('');
-                console.log(`${colors.bright}${colors.cyan}📄 ${finding.file}${colors.reset}`);
+                Logger.emit('');
+                Logger.emit(`${colors.bright}${colors.cyan}📄 ${finding.file}${colors.reset}`);
                 lastFile = finding.file;
             }
             const tag = finding.severity === SEVERITY.ERROR ? colors.red('error')
                 : finding.severity === SEVERITY.WARNING ? colors.yellow('warn ')
                 : colors.gray('info ');
             const loc = finding.line ? colors.gray(`:${finding.line}`) : '';
-            console.log(`   ${tag}${loc}  ${finding.message}${colors.gray(`  [${finding.rule}]`)}`);
-            if (finding.fix) console.log(`         ${colors.gray('↳')} ${colors.gray(finding.fix)}`);
+            Logger.emit(`   ${tag}${loc}  ${finding.message}${colors.gray(`  [${finding.rule}]`)}`);
+            if (finding.fix) Logger.emit(`         ${colors.gray('↳')} ${colors.gray(finding.fix)}`);
         }
 
-        console.log('');
-        console.log(colors.gray + '─'.repeat(64) + colors.reset);
+        Logger.emit('');
+        Logger.emit(colors.gray + '─'.repeat(64) + colors.reset);
         if (errors.length === 0) {
             Logger.success(`Pre-flight passed — ${warnings.length} warning(s), ${infos.length} note(s), 0 errors.`);
         } else {

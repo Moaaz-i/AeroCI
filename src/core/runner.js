@@ -166,7 +166,7 @@ class Runner {
             results = await engine.run(files);
         } catch (err) {
             Logger.error(`AeroCI crashed: ${err.message}`);
-            if (options.debugOnFailure) console.error(err.stack);
+            if (options.debugOnFailure) Logger.emitErr(err.stack);
             return 1;
         }
 
@@ -251,7 +251,7 @@ class Runner {
                 return sum + (Array.isArray(job.matrixInstances) ? job.matrixInstances.length : 1);
             }, 0);
 
-            console.log(colors.gray + '─'.repeat(64) + colors.reset);
+            Logger.emit(colors.gray + '─'.repeat(64) + colors.reset);
             Runner._printSummary(result, { declaredSteps, expectedSteps, executedSteps });
             Reporter.printCoverage({
                 expected: expectedSteps,
@@ -269,7 +269,7 @@ class Runner {
                     doc = (Engine.loadWorkflowFile(result.file).doc) || {};
                 } catch (_) { /* the engine already reported a bad file */ }
                 const runnerLabel = firstRunsOn(doc) || 'ubuntu-latest';
-                console.log(colors.gray + '─'.repeat(64) + colors.reset);
+                Logger.emit(colors.gray + '─'.repeat(64) + colors.reset);
                 profiler.printAll({ doc, runner: runnerLabel });
             }
 

@@ -154,14 +154,14 @@ class Debugger {
         fs.writeFileSync(env.GITHUB_EVENT_PATH, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 
         // ── report ─────────────────────────────────────────────────────────
-        console.log('');
+        Logger.emit('');
         Logger.banner();
         if (step) {
             Logger.error(`Reproducing the failure of ${colors.bright(`${step.jobId} › ${step.name}`)}`);
             if (step.script) {
-                console.log(colors.gray('  the command was:'));
+                Logger.emit(colors.gray('  the command was:'));
                 for (const line of String(step.script).trimEnd().split('\n')) {
-                    console.log(colors.gray(`    ${line}`));
+                    Logger.emit(colors.gray(`    ${line}`));
                 }
             }
             if (step.exitCode !== null && step.exitCode !== undefined) {
@@ -171,7 +171,7 @@ class Debugger {
         } else {
             Logger.info('No failing step given — starting a plain debug shell.');
         }
-        console.log('');
+        Logger.emit('');
         Logger.metric('Workspace', workspace + (sandbox ? colors.gray('  (isolated copy)') : colors.gray('  (NOT isolated)')));
         Logger.metric('Event', env.GITHUB_EVENT_NAME);
         if (gitState.isRepo) {
@@ -191,7 +191,7 @@ class Debugger {
         }
         Logger.note('  The file commands work: GITHUB_ENV, GITHUB_OUTPUT, GITHUB_PATH,');
         Logger.note('  GITHUB_STATE, GITHUB_STEP_SUMMARY and RUNNER_TEMP are real files.');
-        console.log(colors.gray('  Ctrl+D or `exit` to leave.' + colors.reset));
+        Logger.emit(colors.gray('  Ctrl+D or `exit` to leave.' + colors.reset));
 
         // ── the shell ──────────────────────────────────────────────────────
         const shell = defaultShell();
