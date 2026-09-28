@@ -79,8 +79,10 @@ combination. See [sandbox.md](./sandbox.md).
 | `--format <list>` | `json,markdown,html,junit` (default: all four) |
 | `--json [path]` | write the run summary as JSON |
 | `--no-annotations` | do not emit `::error` / `::warning` workflow commands |
-| `--allow-download` | install a runtime from nodejs.org when the workflow needs a version this machine lacks |
-| `--deny-download` | never install a runtime; report the requested version and carry on with the local one |
+| `--allow-download` | let AeroCI fetch a runtime from nodejs.org when a workflow needs a version this machine lacks |
+| `--deny-download` | never fetch a runtime; a `setup-node` step that needs one fails |
+| `--allow-network` | let the workflow's own `run:` steps reach the network, as on a runner |
+| `--deny-network` | deny the workflow's `run:` steps outbound access (the default, where enforceable) |
 | `--profile` | show the timing table and the cost projection |
 
 **Exit code:** `0` when every job succeeded, `1` when any step failed, and `7`
@@ -93,22 +95,48 @@ aeroci run 'release-*.yml'                  # a glob
 aeroci run --only-job build --event pull_request
 aeroci run --report --format json,html
 aeroci run --dry-run                        # what would run, and why
+aeroci run --allow-network                  # this one may reach the internet
 ```
 
 `--dry-run` resolves expressions, the job graph and matrix expansion, then
 stops. It is the fast way to see what a workflow *would* do — including which
 steps a failing dependency would skip — without spending the time.
 
-### Download consent
+### Network consent
 
-`--allow-download` and `--deny-download` only matter when a workflow uses
-`actions/setup-node` for a version this machine does not already have. They
-answer for that one run and never write to `.aeroci.json`; with neither, the
-recorded `toolchain.allowDownload` is used, and failing that a terminal is asked
-once and the answer is saved. A run with no terminal downloads nothing.
+These are two separate decisions, and neither is the other's answer.
 
-Passing one in CI is the right move — it is explicit, and it leaves no trace in
-the repository. See [Toolchains](./features/actions.md#toolchains).
+`--allow-network` / `--deny-network` govern **the workflow's own `run:` steps**.
+The default is to deny, so a workflow that phones home has to be allowed to;
+`--deny-network` says so explicitly and `--allow-network` overrides the recorded
+answer for one run.
+
+`--allow-download` / `--deny-download` govern **AeroCI itself** fetching a
+Node build from nodejs.org for a workflow that needs a version this machine
+lacks. `--deny-download` makes such a `setup-node` step fail rather than
+substitute a different runtime.
+
+So this is a normal, supported combination:
+
+```bash
+aeroci run --allow-download --deny-network
+```
+
+AeroCI installs the runtime the workflow asked for; the workflow's own steps
+still have no outbound access. A workflow can legitimately need its runtime and
+have no business phoning home.
+
+All four flags answer for one run and are written nowhere — a flag is a decision
+about this run, and quietly rewriting a config file because somebody passed one
+would be a side effect they never asked for. The recorded answers live in
+`~/.aeroci/config.json`, which a repository cannot carry and therefore cannot
+grant for itself. With no flag and no record, a terminal is asked once; with no
+terminal, the answer is no.
+
+Every run states its policy before the first step, and says so whether or not
+this machine can enforce it. Passing a flag in CI is the right move — it is
+explicit and it leaves no trace. See [Network policy](./features/network.md) and
+[Toolchains](./features/actions.md#toolchains).
 
 ---
 

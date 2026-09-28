@@ -132,8 +132,10 @@ program
     .option('--format <list>', 'comma-separated: json,markdown,html,junit', 'json,markdown,html,junit')
     .option('--json [path]', 'write the run summary as JSON (default: alongside the reports)')
     .option('--no-annotations', 'do not emit ::error / ::warning workflow commands')
-    .option('--allow-download', 'install a runtime from nodejs.org when the workflow needs a version this machine lacks')
-    .option('--deny-download', 'never install a runtime; report the requested version and carry on with the local one')
+    .option('--allow-download', 'let AeroCI fetch a runtime from nodejs.org when a workflow needs a version this machine lacks')
+    .option('--deny-download', 'never fetch a runtime; a setup-node step that needs one fails, as it would on a runner')
+    .option('--allow-network', 'let the workflow\'s own run: steps reach the network, as they would on a runner')
+    .option('--deny-network', 'deny the workflow\'s run: steps outbound access (the default, on a machine that can enforce it)')
     .option('--profile', 'show the timing table and the cost projection')
     .action(async (target, options) => {
         Logger.banner();
@@ -155,6 +157,7 @@ program
             annotations: options.annotations !== false,
             reproducers: true,
             allowDownload: options.allowDownload ? true : (options.denyDownload ? false : undefined),
+            allowNetwork: options.allowNetwork ? true : (options.denyNetwork ? false : undefined),
             profile: !!options.profile
         });
         process.exitCode = exitCode;

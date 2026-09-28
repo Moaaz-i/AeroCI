@@ -14,23 +14,25 @@
  *   4. unpack it into a cache under the user's home directory, so the next run
  *      of the same workflow costs nothing.
  *
- * The cache is global on purpose. Node 18 is the same forty megabytes whoever
- * asks for it, so a per-project cache would re-download it for every repository
- * and would also vanish on `rm -rf node_modules`.
+ * The install is global on purpose. Node 18 is the same forty megabytes whoever
+ * asks for it, so a per-project copy would re-download it for every repository
+ * and would also vanish on `rm -rf node_modules`. It lands in
+ * `~/.aeroci/runtimes/node/`, with everything else AeroCI keeps between runs.
  *
  * Downloading reaches the network, so it never happens silently. The decision is
- * asked once, recorded in .aeroci.json and reused. When it is refused, or the
- * network is gone, or no such version exists, the caller is told *which* of those
- * happened and falls back to the host runtime with a loud warning. AeroCI is a
- * simulator, not a gatekeeper: it reports the substitution instead of hiding it.
+ * asked once and recorded in `~/.aeroci/config.json` — see `network.js`, which
+ * owns that decision and every other one about the network.
+ *
+ * When it is refused the caller is told, and the step fails. The whole point of
+ * installing a real runtime is that the job then runs on the one the workflow
+ * asked for; running it on a different one and reporting success is the exact
+ * lie this module was written to remove.
  */
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
-const readline = require('readline');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { spawnSync } = require('child_process');
@@ -385,17 +387,20 @@ async function httpGetToFile(url, dest, { timeout = DOWNLOAD_TIMEOUT_MS, onProgr
     return seen;
 }
 
-// ── cache layout ──────────────────────────────────────────────────────────────
+// ── the global tree ────────────────────────────────────────────────────────────
+//
+// The paths live in `network.js` so the policy file, the runtimes and the caches
+// are described in one place and cannot drift apart. A runtime and a cache are
+// different kinds of thing: the first is installed and verified against a
+// published checksum, the second may be deleted at any moment without anything
+// being wrong. Keeping them under one root with names that say which is which is
+// what makes `rm -rf ~/.aeroci/cache` a safe thing to suggest to somebody.
 
-/** Where toolchains live. `AERO_TOOLCACHE` overrides it, which is how the tests
- *  stay out of the developer's real home directory. */
-function cacheRoot() {
-    return process.env.AERO_TOOLCACHE || path.join(os.homedir(), '.aeroci', 'toolcache');
-}
+const { runtimesRoot, cacheRoot, globalRoot } = require('./network');
 
-function versionDir(version) { return path.join(cacheRoot(), 'node', version); }
+function versionDir(version) { return path.join(runtimesRoot(), 'node', version); }
 
-/** The install root, laid out like the real hosted tool cache:
+/** The install root, laid out like a real hosted tool cache:
  *  `node/<version>/<arch>/bin`. */
 function installDir(version, alias) {
     return path.join(versionDir(version), alias);
@@ -413,30 +418,47 @@ function isComplete(dir) {
 }
 
 // ── the release index ─────────────────────────────────────────────────────────
+//
+// The index is a network resource like any other, and the promise is that nothing
+// reaches out without permission. So it is read from the cache first and only
+// fetched once the caller has said yes — `ensureNode` is the one that asks, and
+// it asks with the concrete version in hand whenever the cache already knows it.
 
-function indexCacheFile() { return path.join(cacheRoot(), 'index.json'); }
+function indexCacheFile() { return path.join(cacheRoot(), 'node', 'index.json'); }
 
 /**
- * The official release index, cached for six hours.
+ * The cached release index, or null when there is nothing usable.
  *
- * A stale copy is better than nothing: if the network is gone, resolving against
- * yesterday's list still produces the right runtime far more often than falling
+ * Never touches the network. A stale copy is still worth having: resolving
+ * against yesterday's list produces the right runtime far more often than falling
  * back to the host does, and the caller is told the list was stale.
+ *
+ * @returns {{index: object[], stale: boolean}|null}
+ */
+function readCachedIndex() {
+    const file = indexCacheFile();
+    let parsed = null;
+    try {
+        parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (_) {
+        return null;
+    }
+    if (!Array.isArray(parsed) || !parsed.length) return null;
+    let age = Infinity;
+    try { age = Date.now() - fs.statSync(file).mtimeMs; } catch (_) { /* keep Infinity */ }
+    return { index: parsed, stale: age >= INDEX_TTL_MS };
+}
+
+/**
+ * Fetch the official release index and cache it for six hours.
+ *
+ * The caller has already established that reaching nodejs.org is permitted; this
+ * function assumes it and does not ask again.
  *
  * @returns {Promise<{index: object[], stale: boolean}>}
  */
 async function fetchIndex() {
     const file = indexCacheFile();
-    let cached = null;
-    try {
-        const age = Date.now() - fs.statSync(file).mtimeMs;
-        if (age < INDEX_TTL_MS) {
-            cached = JSON.parse(fs.readFileSync(file, 'utf8'));
-            if (Array.isArray(cached) && cached.length) return { index: cached, stale: false };
-            cached = null;
-        }
-    } catch (_) { cached = null; }
-
     try {
         const body = await httpGetBuffer(`${DIST}/index.json`, { timeout: 30000 });
         const index = JSON.parse(body.toString('utf8'));
@@ -447,13 +469,8 @@ async function fetchIndex() {
         } catch (_) { /* a cache we cannot write is only a slower run */ }
         return { index, stale: false };
     } catch (err) {
-        if (cached) return { index: cached, stale: true };
-        if (fs.existsSync(file)) {
-            try {
-                const index = JSON.parse(fs.readFileSync(file, 'utf8'));
-                if (Array.isArray(index) && index.length) return { index, stale: true };
-            } catch (_) { /* fall through to the error below */ }
-        }
+        const cached = readCachedIndex();
+        if (cached) return { index: cached.index, stale: true };
         throw new Error(`could not read the Node release index: ${err.message}`);
     }
 }
@@ -518,7 +535,7 @@ async function installNode(entry, platform, { onProgress } = {}) {
 
     const url = `${DIST}/v${version}/${filename}`;
     const expected = await publishedChecksum(version, filename);
-    const staging = path.join(cacheRoot(), '.staging');
+    const staging = path.join(cacheRoot(), 'downloads');
     fs.mkdirSync(staging, { recursive: true });
     const archive = path.join(staging, filename);
     const part = `${archive}.part`;
@@ -558,6 +575,7 @@ async function installNode(entry, platform, { onProgress } = {}) {
         if (!fs.existsSync(link)) {
             try { fs.symlinkSync(target, link, 'dir'); } catch (_) { /* a name collision is not fatal */ }
         }
+        linkVersionAliases();
         fs.rmSync(unpacked, { recursive: true, force: true });
     } catch (err) {
         fs.rmSync(part, { force: true });
@@ -565,6 +583,67 @@ async function installNode(entry, platform, { onProgress } = {}) {
     }
 
     return { dir: target, bin: targetBin };
+}
+
+/** Whether a version directory holds a real, complete install under any of the
+ *  architecture names this platform map knows about. */
+function hasInstall(nodeDir, version) {
+    return Object.values(PLATFORMS)
+        .map((p) => p.alias)
+        .some((alias) => isComplete(path.join(nodeDir, version, alias)));
+}
+
+/**
+ * Point `node/18` and `node/18.20` at the newest installed build they cover.
+ *
+ * The concrete directory is the real one — `18.20.8` names a build you can point
+ * at and get that build. The short names are symlinks onto it, so `ls
+ * ~/.aeroci/runtimes/node` reads the way a person expects while nothing stays
+ * ambiguous about which directory is which.
+ *
+ * The aliases are recomputed from what is on disk rather than written once,
+ * because "newest" changes: installing 18.20.9 has to move `18`, and deleting a
+ * runtime by hand must not leave `18` pointing at nothing. The comparison uses
+ * `readlink` rather than `realpath` for exactly that reason — `realpath` throws
+ * on a dangling link, which is the one case that most needs fixing.
+ */
+function linkVersionAliases() {
+    const nodeDir = path.join(runtimesRoot(), 'node');
+    let entries;
+    try {
+        entries = fs.readdirSync(nodeDir);
+    } catch (_) {
+        return;
+    }
+
+    const installed = entries
+        .map((name) => ({ name, parsed: parseVersion(name) }))
+        .filter(({ name, parsed }) => parsed && hasInstall(nodeDir, name));
+    if (!installed.length) return;
+
+    // For each `18` and each `18.20`, the newest install it covers.
+    const newest = new Map();
+    for (const { name, parsed } of installed) {
+        for (const alias of [`${parsed.major}`, `${parsed.major}.${parsed.minor}`]) {
+            const held = newest.get(alias);
+            if (!held || compareVersions(parsed, held.parsed) > 0) newest.set(alias, { name, parsed });
+        }
+    }
+
+    for (const [alias, { name }] of newest) {
+        if (alias === name) continue;
+        const link = path.join(nodeDir, alias);
+        const target = path.join(nodeDir, name);
+        try {
+            if (fs.lstatSync(link, { throwIfNoEntry: false })) {
+                let current = null;
+                try { current = fs.readlinkSync(link); } catch (_) { current = null; }
+                if (current === target) continue;
+                fs.unlinkSync(link);
+            }
+            fs.symlinkSync(target, link, 'dir');
+        } catch (_) { /* a link that will not take is not a broken install */ }
+    }
 }
 
 /** Run the freshly unpacked binary and report what it claims to be. A runtime
@@ -602,8 +681,10 @@ function probeVersion(bin) {
  * @param {object} options
  * @param {boolean|null} options.allowDownload true, false, or null to ask
  * @param {Function} [options.onProgress]
- * @param {Function} [options.decide] called as decide(question) when
- *   `allowDownload` is null; returns true, false, or null to abstain
+ * @param {Function} [options.decide] called as decide(requested, resolvedVersion)
+ *   when `allowDownload` is null. `resolvedVersion` is the concrete build when
+ *   the cached index already knows it and `''` when AeroCI would first have to
+ *   reach nodejs.org to find out. Returns true, false, or null to abstain.
  * @returns {Promise<NodeResult>}
  */
 async function ensureNode(spec, { allowDownload = null, onProgress, decide } = {}) {
@@ -622,15 +703,43 @@ async function ensureNode(spec, { allowDownload = null, onProgress, decide } = {
         };
     }
 
-    // The index is needed to turn "18" into "18.20.8", so it is fetched even when
-    // the host happens to match: without it there is no way to know what the spec
-    // resolves to, and a silent substitution is what this module exists to stop.
+    // One decision, asked at most once per call, covering both the index lookup
+    // and the archive: they are the same permission — reaching nodejs.org — and
+    // asking twice about one download would be two questions for one decision.
+    let decided = null;
+    const permitted = async (version) => {
+        if (allowDownload === true || allowDownload === false) return allowDownload;
+        if (decided !== null) return decided;
+        if (typeof decide !== 'function') return null;
+        const answer = await decide(requested, version);
+        decided = answer === true || answer === false ? answer : null;
+        return decided;
+    };
+
+    const noIndex = () => ({
+        ok: false, spec: requested, reason: 'no-index',
+        message: 'the Node release index is not cached and network access was not authorized, ' +
+                 `so "${requested}" cannot be resolved to a build`
+    });
+
+    // Turning "18" into "18.20.8" needs nodejs.org's release index, so the index is
+    // read even when the host happens to match: without it there is no way to know
+    // what the spec resolves to, and a silent substitution is what this module
+    // exists to stop. A cached copy answers without reaching out at all, which is
+    // why a run that has done this before needs no permission to resolve a version.
+    const cached = readCachedIndex();
     let index;
     let staleIndex = false;
-    try {
-        ({ index, staleIndex } = await fetchIndex());
-    } catch (err) {
-        return { ok: false, spec: requested, reason: 'offline', message: err.message };
+    if (cached) {
+        index = cached.index;
+        staleIndex = true;
+    } else {
+        if (!(await permitted(''))) return noIndex();
+        try {
+            ({ index, staleIndex } = await fetchIndex());
+        } catch (err) {
+            return { ok: false, spec: requested, reason: 'offline', message: err.message };
+        }
     }
 
     const resolved = resolveFromIndex(index, requested, platform);
@@ -667,11 +776,7 @@ async function ensureNode(spec, { allowDownload = null, onProgress, decide } = {
         fs.rmSync(dir, { recursive: true, force: true });
     }
 
-    let permitted = allowDownload;
-    if (permitted === null || permitted === undefined) {
-        permitted = typeof decide === 'function' ? await decide(requested, version) : null;
-    }
-    if (!permitted) {
+    if (!(await permitted(version))) {
         return {
             ok: false, spec: requested, reason: 'denied',
             message: `downloading Node ${version} was not permitted`
@@ -704,52 +809,13 @@ async function ensureNode(spec, { allowDownload = null, onProgress, decide } = {
     };
 }
 
-/** Ask on stderr, so a piped `--json` on stdout stays parseable. */
-function askYesNo(question) {
-    return new Promise((resolve) => {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-        rl.question(`${question} [y/N] `, (answer) => {
-            rl.close();
-            const text = String(answer || '').trim().toLowerCase();
-            resolve(text === 'y' || text === 'yes');
-        });
-    });
-}
-
-/**
- * Decide whether a runtime may be downloaded, asking the user at most once.
- *
- * The order is deliberate:
- *
- *   1. a flag on this invocation answers it for this run and is not recorded —
- *      an explicit flag is a decision about *this* run, and quietly writing it
- *      into the project file would be a side effect nobody asked for;
- *   2. otherwise the recorded answer in .aeroci.json is used, which is the
- *      "ask once" part;
- *   3. with neither, an interactive terminal is asked once and the answer is
- *      saved for next time;
- *   4. with neither and no terminal — a CI job, a pipe, a cron job — nothing is
- *      downloaded. Guessing "yes" would make a pipeline pull forty megabytes it
- *      never agreed to, and the step reports the substitution either way.
- *
- * @param {import('./config').Config} config
- * @param {{explicit?: boolean}} options `explicit` is the CLI flag, if given.
- * @returns {Promise<boolean>}
- */
-async function resolveConsent(config, { explicit } = {}) {
-    if (explicit === true || explicit === false) return explicit;
-    const recorded = config && config.allowDownload;
-    if (recorded === true || recorded === false) return recorded;
-    if (!process.stdin.isTTY) return false;
-    const answer = await askYesNo('Download the requested runtime from nodejs.org?');
-    if (config && typeof config.saveAllowDownload === 'function') config.saveAllowDownload(answer);
-    return answer;
-}
-
 module.exports = {
     ensureNode,
-    resolveConsent,
+    // Re-exported so callers that already depend on the toolchain do not have to
+    // know that the layout moved. The paths themselves are owned by `network.js`.
+    runtimesRoot,
     cacheRoot,
+    globalRoot,
     currentPlatform,
     resolveFromIndex,
     parseRange,

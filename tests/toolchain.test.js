@@ -1,5 +1,5 @@
 /**
- * Toolchain: version resolution, the cache, and consent to download.
+ * Toolchain: version resolution, the runtime store, and refusing honestly.
  *
  * The parsing and resolution tests run against a checked-in slice of Node's real
  * release index rather than a hand-written one. A made-up index would happily
@@ -7,8 +7,11 @@
  * that asked for 18.20.4 — which is exactly the bug this module was written to
  * remove, and exactly what it did before the pin case was fixed.
  *
- * Nothing here reaches the network. The download path is exercised by the CLI
- * end-to-end, not by the unit tests, so the suite stays fast and offline.
+ * Nothing here reaches the network. The index is written into the cache by hand,
+ * which is also the arrangement the runtime uses in production once it has been
+ * fetched once: a cached index resolves a version request with no connectivity
+ * at all. The download path itself is exercised by the CLI end-to-end, so this
+ * suite stays fast and offline.
  */
 
 const fs = require('fs');
@@ -17,11 +20,11 @@ const path = require('path');
 
 const { suite, test, asyncTest, assert } = require('./harness');
 const {
-    ensureNode, resolveConsent, resolveFromIndex, parseRange, satisfies,
-    parseVersion, compareVersions, normaliseSpec, currentPlatform, cacheRoot
+    ensureNode, resolveFromIndex, parseRange, satisfies,
+    parseVersion, compareVersions, normaliseSpec, currentPlatform,
+    runtimesRoot, globalRoot, cacheRoot
 } = require('../src/core/toolchain');
 const { Sandbox } = require('../src/core/sandbox');
-const { Config } = require('../src/core/config');
 
 /** A slice of nodejs.org/dist/index.json, with the real shape and real versions. */
 const INDEX = [
@@ -169,118 +172,68 @@ suite('toolchain · resolving against the release index', () => {
     });
 });
 
-suite('toolchain · the cache location', () => {
-    test('it is global, so one download serves every project', () => {
-        const saved = process.env.AERO_TOOLCACHE;
+suite('toolchain · the global tree', () => {
+    test('runtimes and cache are siblings, not the same directory', () => {
+        const saved = process.env.AERO_HOME;
         try {
-            delete process.env.AERO_TOOLCACHE;
-            assert.strictEqual(cacheRoot(), path.join(os.homedir(), '.aeroci', 'toolcache'));
+            delete process.env.AERO_HOME;
+            const home = path.join(os.homedir(), '.aeroci');
+            assert.strictEqual(globalRoot(), home);
+            assert.strictEqual(runtimesRoot(), path.join(home, 'runtimes'));
+            assert.strictEqual(cacheRoot(), path.join(home, 'cache'));
+            // A runtime is installed and checksum-verified; a cache may be
+            // deleted at any moment. Sharing one directory would mean
+            // `rm -rf cache` could take an install with it.
+            assert.notStrictEqual(runtimesRoot(), cacheRoot());
         } finally {
-            if (saved !== undefined) process.env.AERO_TOOLCACHE = saved;
+            if (saved !== undefined) process.env.AERO_HOME = saved;
         }
     });
 
-    test('the sandbox never copies the cache, even from inside the project', () => {
-        // A cache that sits inside the repository used to be cloned into every
+    test('AERO_HOME moves the whole tree, which is how these tests stay out of ~/', () => {
+        const saved = process.env.AERO_HOME;
+        process.env.AERO_HOME = path.join(os.tmpdir(), 'aeroci-fake-home');
+        try {
+            assert.strictEqual(globalRoot(), path.join(os.tmpdir(), 'aeroci-fake-home'));
+            assert.strictEqual(runtimesRoot(), path.join(os.tmpdir(), 'aeroci-fake-home', 'runtimes'));
+            assert.strictEqual(cacheRoot(), path.join(os.tmpdir(), 'aeroci-fake-home', 'cache'));
+        } finally {
+            if (saved === undefined) delete process.env.AERO_HOME;
+            else process.env.AERO_HOME = saved;
+        }
+    });
+
+    test('the sandbox never copies the runtime store, even from inside the project', () => {
+        // A store that sits inside the repository used to be cloned into every
         // sandbox: 205 MB and 2340 files, on every run, for a runtime the run
         // then installs again.
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aeroci-sbxc-'));
         const project = path.join(root, 'proj');
-        const cache = path.join(project, 'toolcache');
-        fs.mkdirSync(path.join(cache, 'node', '18.20.8', 'arm64', 'bin'), { recursive: true });
+        const home = path.join(project, '.aeroci');
+        const runtimes = path.join(home, 'runtimes', 'node', '18.20.8', 'arm64', 'bin');
+        fs.mkdirSync(runtimes, { recursive: true });
         fs.mkdirSync(path.join(project, 'src'), { recursive: true });
         fs.writeFileSync(path.join(project, 'src', 'a.txt'), 'a');
         for (let i = 0; i < 60; i++) {
-            fs.writeFileSync(path.join(cache, 'node', '18.20.8', 'arm64', 'bin', `f${i}`), 'x');
+            fs.writeFileSync(path.join(runtimes, `f${i}`), 'x');
         }
 
-        const saved = process.env.AERO_TOOLCACHE;
-        process.env.AERO_TOOLCACHE = cache;
+        const saved = process.env.AERO_HOME;
+        process.env.AERO_HOME = home;
         try {
-            const withIt = Sandbox.create(project, { exclude: [], excludePaths: [cacheRoot()] });
+            const withIt = Sandbox.create(project, { exclude: [], excludePaths: [globalRoot()] });
             const copied = withIt.stats.files;
-            const leaked = fs.existsSync(path.join(withIt.dir, 'toolcache'));
+            const leaked = fs.existsSync(path.join(withIt.dir, '.aeroci'));
             const keptSrc = fs.existsSync(path.join(withIt.dir, 'src', 'a.txt'));
             withIt.dispose({ Logger: { info() {} }, quiet: true });
 
-            assert.ok(!leaked, 'the tool cache must not be copied into the sandbox');
+            assert.ok(!leaked, 'the runtime store must not be copied into the sandbox');
             assert.ok(keptSrc, 'the rest of the project must still be copied');
             assert.ok(copied < 10, `only the project should be copied, got ${copied} files`);
         } finally {
-            if (saved === undefined) delete process.env.AERO_TOOLCACHE;
-            else process.env.AERO_TOOLCACHE = saved;
+            if (saved === undefined) delete process.env.AERO_HOME;
+            else process.env.AERO_HOME = saved;
             fs.rmSync(root, { recursive: true, force: true });
-        }
-    });
-});
-
-suite('toolchain · consent to download', () => {
-    const tmpConfig = (contents) => {
-        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aeroci-cfg-'));
-        if (contents !== undefined) {
-            fs.writeFileSync(path.join(dir, '.aeroci.json'), JSON.stringify(contents), 'utf8');
-        }
-        return dir;
-    };
-
-    asyncTest('a flag answers for this run and is not written to the project', async () => {
-        const dir = tmpConfig({ version: 1, mySetting: 'keep me' });
-        try {
-            const config = new Config(dir).load();
-            assert.strictEqual(await resolveConsent(config, { explicit: true }), true);
-            assert.strictEqual(await resolveConsent(config, { explicit: false }), false);
-            const written = JSON.parse(fs.readFileSync(path.join(dir, '.aeroci.json'), 'utf8'));
-            assert.strictEqual(written.toolchain, undefined, 'a flag must not edit .aeroci.json');
-            assert.strictEqual(written.mySetting, 'keep me');
-        } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
-        }
-    });
-
-    asyncTest('a recorded answer is reused, and nothing is asked', async () => {
-        for (const recorded of [true, false]) {
-            const dir = tmpConfig({ version: 1, toolchain: { allowDownload: recorded } });
-            try {
-                const config = new Config(dir).load();
-                assert.strictEqual(config.allowDownload, recorded);
-                assert.strictEqual(await resolveConsent(config), recorded);
-            } finally {
-                fs.rmSync(dir, { recursive: true, force: true });
-            }
-        }
-    });
-
-    asyncTest('with no record and no terminal, nothing is downloaded', async () => {
-        // A CI job or a pipe cannot answer a question, so the answer is no.
-        // Guessing yes would pull forty megabytes a pipeline never agreed to.
-        const dir = tmpConfig();
-        try {
-            const config = new Config(dir).load();
-            assert.strictEqual(config.allowDownload, null, 'nobody has decided yet');
-            const isTTY = process.stdin.isTTY;
-            process.stdin.isTTY = false;
-            try {
-                assert.strictEqual(await resolveConsent(config), false);
-            } finally {
-                process.stdin.isTTY = isTTY;
-            }
-            assert.ok(!fs.existsSync(path.join(dir, '.aeroci.json')), 'nothing should be written');
-        } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
-        }
-    });
-
-    test('saving the answer keeps the user\'s own keys', () => {
-        const dir = tmpConfig({ version: 1, vars: { DEPLOY: 'yes' } });
-        try {
-            const config = new Config(dir).load();
-            assert.strictEqual(config.saveAllowDownload(true), true);
-            const written = JSON.parse(fs.readFileSync(path.join(dir, '.aeroci.json'), 'utf8'));
-            assert.strictEqual(written.toolchain.allowDownload, true);
-            assert.deepStrictEqual(written.vars, { DEPLOY: 'yes' });
-            assert.strictEqual(new Config(dir).load().allowDownload, true);
-        } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
         }
     });
 });
@@ -290,19 +243,29 @@ suite('toolchain · refusing honestly', () => {
     // caller as a distinct reason, because each one needs a different sentence
     // and a different remedy. A generic "could not set up Node" would hide the
     // difference between "you said no" and "there is no such version".
-    const reasonsFor = async (spec) => {
-        const saved = process.env.AERO_TOOLCACHE;
+    //
+    // The index is seeded by hand, so these never touch the network — which is
+    // also how the refusal path is reached in production once the index has been
+    // fetched at least once.
+    const withHome = (contents, fn) => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aeroci-tc-'));
-        process.env.AERO_TOOLCACHE = path.join(dir, 'cache');
+        const home = path.join(dir, 'home');
+        if (contents !== null) {
+            fs.mkdirSync(path.join(home, 'cache', 'node'), { recursive: true });
+            fs.writeFileSync(path.join(home, 'cache', 'node', 'index.json'), JSON.stringify(INDEX), 'utf8');
+        }
+        const saved = process.env.AERO_HOME;
+        process.env.AERO_HOME = home;
         try {
-            const result = await ensureNode(spec, { allowDownload: false });
-            return result;
+            return fn();
         } finally {
-            if (saved === undefined) delete process.env.AERO_TOOLCACHE;
-            else process.env.AERO_TOOLCACHE = saved;
+            if (saved === undefined) delete process.env.AERO_HOME;
+            else process.env.AERO_HOME = saved;
             fs.rmSync(dir, { recursive: true, force: true });
         }
     };
+
+    const reasonsFor = (spec) => withHome(INDEX, () => ensureNode(spec, { allowDownload: false }));
 
     asyncTest('a spec with no version behind it is "not found", not a crash', async () => {
         const result = await reasonsFor('99');
@@ -325,8 +288,8 @@ suite('toolchain · refusing honestly', () => {
         assert.strictEqual(result.ok, false);
         assert.strictEqual(result.reason, 'denied');
         assert.ok(result.message.includes('18.20.8'), result.message);
-        // The message states the reason only; wording the fallback is the
-        // caller's job, so the two are not said twice.
+        // The message states the reason only; wording the remedy is the caller's
+        // job, so the two are not said twice.
         assert.ok(!/used instead/.test(result.message), result.message);
     });
 
@@ -334,5 +297,26 @@ suite('toolchain · refusing honestly', () => {
         const result = await reasonsFor('');
         assert.strictEqual(result.ok, false);
         assert.strictEqual(result.reason, 'no-spec');
+    });
+
+    asyncTest('a cached index resolves a version with no network at all', async () => {
+        // The promise AeroCI makes is that it never reaches the network without
+        // permission. Reading the index is a network request like any other, so
+        // with a cached copy and no permission the answer has to come from disk —
+        // and it has to be the real resolution, not a shrug.
+        const result = await reasonsFor('18');
+        assert.strictEqual(result.reason, 'denied');
+        assert.ok(result.message.includes('18.20.8'), 'resolved offline against the cache');
+    });
+
+    asyncTest('with no cached index and no permission, it says so instead of reaching out', async () => {
+        // `null` here, not `false`: nobody has been asked, so the question is
+        // asked. A non-interactive run cannot answer, and answering for it would
+        // be the network access it never agreed to.
+        const result = await withHome(null, () => ensureNode('18', {}));
+        assert.strictEqual(result.ok, false);
+        assert.strictEqual(result.reason, 'no-index');
+        assert.ok(/not authorized/.test(result.message), result.message);
+        assert.ok(result.message.includes('18'), result.message);
     });
 });

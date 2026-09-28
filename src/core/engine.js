@@ -29,7 +29,7 @@ const { Sandbox } = require('./sandbox');
 const { ArtifactStore } = require('./artifacts');
 const { FileCommandSet } = require('./action-files');
 const { ActionSimulators, MATCHERS } = require('./action-simulators');
-const { cacheRoot } = require('./toolchain');
+const { runtimesRoot, globalRoot, actionsCacheRoot, guard: networkGuard, resolveRuntimeConsent } = require('./network');
 const { parseLocalAction, entryExists } = require('./local-action');
 const { readGitState, buildEventPayload, buildGithubContext } = require('./event');
 const expressions = require('./expressions');
@@ -76,10 +76,19 @@ class Engine {
         this.unmaskSecrets = options.unmaskSecrets ?? process.env.AERO_UNMASK_SECRETS === '1';
         this.onStepStart = options.onStepStart || null;
         this.onStepEnd = options.onStepEnd || null;
-        // Whether `actions/setup-*` may install a runtime from the network.
-        // `null` is the honest default: the question is asked once, by the CLI,
-        // and until it is answered nothing is downloaded.
-        this.allowDownload = options.allowDownload === true;
+        // The network policy for this run, already decided by the CLI.
+        //
+        // `allowed` is what the user chose. `enforced` is whether this machine can
+        // actually deliver it. They are separate because collapsing them would let
+        // AeroCI print "network denied" while a step quietly opened a socket, and
+        // that is a claim it must never make. When a denial cannot be enforced the
+        // run says so in those words and continues.
+        this.network = options.network || networkGuard(true);
+        // Whether `actions/setup-*` may install a runtime from the network, and
+        // who to ask when nobody has decided yet. `null` is the honest default:
+        // the question is asked by the step that needs the answer, because that is
+        // the only place that knows which version is being asked for.
+        this.allowDownload = options.allowDownload === undefined ? null : options.allowDownload;
         // Per-workflow wiring, replaced for every file.
         this.workspace = null;
         this.simulators = null;
@@ -207,7 +216,12 @@ class Engine {
         };
 
         const artifacts = new ArtifactStore(path.join(runRoot, 'artifacts'));
-        const cacheDir = path.join(runRoot, 'cache');
+        // `actions/cache` keeps entries between runs, which is the entire point
+        // of the action: a cache that dies with the process it was written in can
+        // never hit on the next run. So it lives in the global tree, beside the
+        // runtimes, and outlives the run directory that holds everything else.
+        const cacheDir = actionsCacheRoot();
+        try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) { /* the step will say so */ }
         const eventPath = path.join(runRoot, 'event.json');
         const eventName = this._pickEvent(doc);
         result.eventName = eventName;
@@ -279,6 +293,10 @@ class Engine {
             Logger.note(`  ${shared.join(', ')}`);
             Logger.note('  A step that writes into them edits the real files. Everything else is still a private copy.');
         }
+
+        // Said here, before any step runs, for the same reason: a policy the user
+        // has to discover from a step's output is a policy they cannot act on.
+        this._announceNetworkPolicy();
 
         for (const jobId of order) {
             const job = doc.jobs[jobId];
@@ -382,7 +400,17 @@ class Engine {
                         cacheDir,
                         eventPath,
                         repo: gitState.repository,
-                        toolchain: { allowDownload: this.allowDownload }
+                        toolchain: {
+                            allowDownload: this.allowDownload,
+                            // The question is asked here, where the concrete
+                            // version is known, so it can name the build it is
+                            // offering instead of a range.
+                            decide: (spec, version) => resolveRuntimeConsent({
+                                explicit: this.allowDownload,
+                                spec,
+                                version
+                            })
+                        }
                     });
 
                     instance = await this._runJobInstance({ jobId, job, ctx });
@@ -523,7 +551,7 @@ class Engine {
             os: RUNNER_OS,
             arch: process.arch === 'arm64' ? 'ARM64' : 'X64',
             temp: sandbox.resolve('_temp'),
-            tool_cache: cacheRoot(),
+            tool_cache: runtimesRoot(),
             debug: this.debug ? '1' : '',
             environment: 'aeroci'
         };
@@ -640,7 +668,12 @@ class Engine {
         // counted the wrong number of paths. One list, not three.
         return Sandbox.create(this.cwd, {
             exclude: cfg ? cfg.sandboxExcludes : [...DEFAULTS.sandbox.exclude],
-            excludePaths: [cacheRoot()],
+            // The whole global tree, not just one part of it. Excluding
+            // `runtimes/` while letting `cache/` in would copy a release index and
+            // half-downloaded archives into every sandbox, and the directory name
+            // alone proves nothing: AERO_HOME can point anywhere, including
+            // inside the project being run.
+            excludePaths: [globalRoot()],
             keep: this.options.keepSandbox,
             mode: cfg ? cfg.sandbox.mode : DEFAULTS.sandbox.mode
         });
@@ -867,6 +900,50 @@ class Engine {
         this._applyActionResult(this.simulators.generic(step, uses), record);
     }
 
+    /**
+     * Put a command inside the network guard, when there is one.
+     *
+     * Returns the command unchanged when access is allowed, and when a denial was
+     * decided but this machine cannot enforce it — in that second case the run has
+     * already been told, out loud, that the policy is not in force. Refusing to run
+     * would be the other honest option, and it is a worse one: it makes AeroCI
+     * unusable on Windows and on kernels without user namespaces, and a tool
+     * nobody can run does not protect anybody.
+     *
+     * @param {string} command
+     * @param {string[]} args
+     * @returns {{command: string, argv: string[]}}
+     */
+    _guarded(command, args) {
+        const net = this.network;
+        if (!net || net.allowed || !net.enforced || !net.command) {
+            return { command, argv: args };
+        }
+        return { command: net.command, argv: [...net.args, command, ...args] };
+    }
+
+    /**
+     * Say, once per run, what the network policy is and whether it is real.
+     *
+     * Silence here would be the worst option available: a user who answered "no"
+     * and then watched a step fetch a package has been lied to, and a user on a
+     * platform with no isolation has no way to know the answer did not apply.
+     */
+    _announceNetworkPolicy() {
+        const net = this.network;
+        if (!net) return;
+        if (net.allowed) {
+            Logger.note(`${colors.gray}Workflow network: ALLOWED — run: steps may reach the network, as on a runner${colors.reset}`);
+            return;
+        }
+        if (net.enforced) {
+            Logger.note(`${colors.gray}Workflow network: DENIED — enforced with ${net.mechanism} on every run: step${colors.reset}`);
+            return;
+        }
+        Logger.warn(`Workflow network: DENIED by policy but NOT ENFORCED — ${net.reason}. ` +
+                    'Steps may still reach the network. Use --allow-network to allow it deliberately.');
+    }
+
     _applyActionResult(result, record) {
         record.outputs = result.outputs || {};
         record.notSimulated = !!result.notSimulated;
@@ -876,9 +953,12 @@ class Engine {
         }
         for (const message of result.messages || []) {
             const text = String(message);
+            // `✖` is the marker this codebase writes; `✗` is accepted too, because
+            // a message is content and a simulator is free to phrase its own
+            // failure however it likes. Both are errors, and neither is a warning.
             if (text.startsWith('⚠')) record.warnings.push(text);
-            if (text.startsWith('✖')) record.errors.push(text);
-            const isProblem = text.startsWith('⚠') || text.startsWith('✖');
+            if (text.startsWith('✖') || text.startsWith('✗')) record.errors.push(text);
+            const isProblem = text.startsWith('⚠') || text.startsWith('✖') || text.startsWith('✗');
             Logger.note(`   ${isProblem ? colors.yellow(text) : colors.gray(text)}`);
         }
     }
@@ -1057,13 +1137,25 @@ class Engine {
         const timeoutMs = Math.min(stepMinutes, jobTimeoutMinutes) * 60 * 1000;
 
         const args = shell.args.map((arg) => arg.replace(/'\{0\}'/g, scriptFile).replace(/\{0\}/g, scriptFile));
-        const res = await run(shell.command, args, { cwd: workingDir, env, timeoutMs });
+
+        // The whole `run:` step goes inside the guard, shell included. Wrapping
+        // the shell rather than the step's children is what makes the denial
+        // complete: every process the script starts inherits the profile, so a
+        // `curl` piped into a `python` cannot route around it. There is no
+        // per-command filter to keep in sync, and nothing a step does can escape.
+        const { command, argv } = this._guarded(shell.command, args);
+        const res = await run(command, argv, { cwd: workingDir, env, timeoutMs });
 
         this._consumeOutput(res, ctx, record);
 
         if (res.spawnError) {
             record.status = STATUS.FAILURE;
             record.error = res.spawnError.message;
+            // The most likely reason for a wrapper to fail to start is that the
+            // wrapper is not there. Under a network denial that is very often
+            // AeroCI's own doing, so the step that reports it has to say so rather
+            // than leaving "no such file" to be read as a fault in the project.
+            this._notePossiblePolicyCause(record);
             return;
         }
         if (res.timedOut) {
@@ -1082,6 +1174,35 @@ class Engine {
 
         record.exitCode = res.code;
         record.status = res.code === 0 ? STATUS.SUCCESS : STATUS.FAILURE;
+        if (record.status === STATUS.FAILURE) this._notePossiblePolicyCause(record);
+    }
+
+    /**
+     * Say, once per run, that a failure under a network denial might not be the
+     * workflow's fault.
+     *
+     * `npm install` failing with `ENOTFOUND registry.npmjs.org`, or a `curl`
+     * exiting 6, looks exactly like a broken project until you know the step was
+     * never allowed to reach the network. Without this note the obvious reading is
+     * "this repo has a bad lockfile", and the user goes debugging their project
+     * instead of their own policy — which is the one thing the policy cannot
+     * protect them from.
+     *
+     * Said once rather than per step: a job that installs five packages produces
+     * the same note five times, and repetition reads as five different problems.
+     * Not said for a step that succeeded, and not said at all when access was
+     * allowed, because then the failure really is the workflow's.
+     */
+    _notePossiblePolicyCause(record) {
+        const net = this.network;
+        if (!net || net.allowed) return;
+        if (this._networkCauseNoted) return;
+        this._networkCauseNoted = true;
+        const note = net.enforced
+            ? 'network access is denied for this run, so this failure may be AeroCI’s policy rather than a fault in the workflow — rerun with --allow-network to tell them apart'
+            : 'network access was denied by policy but could not be enforced on this machine, so this failure may have nothing to do with the workflow — rerun with --allow-network to tell them apart';
+        record.warnings.push(note);
+        Logger.warn(`   ⚠ ${note}`);
     }
 
     _echoScript(script, shell) {

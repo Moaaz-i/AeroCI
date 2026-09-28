@@ -221,7 +221,7 @@ RUNNER_ENVIRONMENT=aeroci
 RUNNER_NAME=AeroCI Local Runner
 RUNNER_OS=macOS
 RUNNER_TEMP=…/aeroci-sandbox-XXXXXX/_temp
-RUNNER_TOOL_CACHE=~/.aeroci/toolcache
+RUNNER_TOOL_CACHE=~/.aeroci/runtimes
 ```
 
 `RUNNER_OS` and `RUNNER_ARCH` report your machine, not `Linux`/`X64`. That is
@@ -239,6 +239,11 @@ anything put there was gone before the next one. `actions/setup-node` now
 installs into it for real — see
 [Toolchains](./features/actions.md#toolchains). Because it is outside the
 sandbox, the sandbox copy never includes it.
+
+It points at `runtimes/`, not `cache/`. A runtime is something you installed and
+verified against a published checksum; a cache is something you may delete at any
+moment. Handing a step the runtimes directory means it finds what setup-node
+actually put there, rather than a directory of things that may be gone.
 
 ### When there is no git repository
 

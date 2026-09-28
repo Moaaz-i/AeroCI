@@ -33,7 +33,7 @@ These do the thing, locally.
 | **`actions/github-script`** | Your JavaScript really is evaluated, with a working `@actions/core` shim: `setOutput`, `setFailed`, `setSecret`, `addMask`, `addPath`, `exportVariable`, `getInput`, `getState`/`saveState`, `notice`/`warning`/`error`/`info`/`debug`, `summary`, `startGroup`/`endGroup`. Outputs and masks land where a real run puts them. |
 | **`actions/cache`** | A real cache on disk, in the run's own cache directory. Exact `key` match, then `restore-keys` prefix match, then a miss. Saves on post-job when the primary key was not already hit. The size shown is the real size on disk. |
 | **`actions/upload-artifact`** | Really archives the files. A later `download-artifact` with a matching name really gets them back. |
-| **`actions/setup-node`** | Really installs the version the workflow asked for. The spec is resolved against [nodejs.org's release index](https://nodejs.org/dist/index.json), so `18` means a concrete build such as 18.20.8; the archive is checked against the `SHASUMS256.txt` published beside it; the `bin` is put on the job's `PATH`, so the rest of the job really runs on it. Cached under `~/.aeroci/toolcache`, so it is downloaded once. See [Toolchains](#toolchains) for the download consent. |
+| **`actions/setup-node`** | Really installs the version the workflow asked for. The spec is resolved against [nodejs.org's release index](https://nodejs.org/dist/index.json), so `18` means a concrete build such as 18.20.8; the archive is checked against the `SHASUMS256.txt` published beside it; the `bin` is put on the job's `PATH`, so the rest of the job really runs on it. Stored under `~/.aeroci/runtimes`, so it is downloaded once. When it cannot be provided the step **fails** rather than substituting. See [Toolchains](#toolchains) and [Network policy](./network.md). |
 | **`actions/setup-python`** | Detects `python3`/`python`, checks the requested version, reports the resolved path. |
 | **`actions/setup-go`** | Detects `go version` and checks the requested version. |
 | **`actions/setup-java`** | Detects `java -version`, checks the requested version and distribution. |
@@ -77,11 +77,25 @@ for `21.0.0` rather than settling for `21.0.0-rc.1`.
 
 ### Where it goes
 
-`~/.aeroci/toolcache/node/<version>/<arch>/bin`, laid out like a real hosted
-tool cache, and `$RUNNER_TOOL_CACHE` points at it — so a step that pokes around
-in there finds what setup-node put there. The cache is **global**: Node 18 is the
-same forty megabytes whoever asks for it, so one download serves every project
-and survives `rm -rf node_modules`. Set `AERO_TOOLCACHE` to move it.
+`~/.aeroci/runtimes/node/<version>/<arch>/bin`, laid out like a real hosted tool
+cache, and `$RUNNER_TOOL_CACHE` points at `~/.aeroci/runtimes` — so a step that
+pokes around in there finds what setup-node put there.
+
+The store is **global**: Node 18 is the same forty megabytes whoever asks for it,
+so one download serves every project and survives `rm -rf node_modules`. `ls`
+reads the way a person expects, because the short names are symlinks onto the
+real directory:
+
+```console
+$ ls -l ~/.aeroci/runtimes/node
+18      -> ~/.aeroci/runtimes/node/18.20.8
+18.20   -> ~/.aeroci/runtimes/node/18.20.8
+18.20.8
+```
+
+`18.20.8` is the real directory — a build you can point at and get that build.
+`18` and `18.20` follow the newest install they cover, so installing 18.20.9
+moves them. Set `AERO_HOME` to move the whole tree.
 
 Every download is checked against the `SHASUMS256.txt` nodejs.org publishes
 beside the archive, and the unpacked binary is then run once to confirm it
@@ -90,43 +104,75 @@ is not an install.
 
 ### Asking before it downloads
 
-Downloading is the one thing a run does that reaches the network, so it never
-happens silently.
+Downloading reaches the network, so it never happens silently. The decision is
+recorded in `~/.aeroci/config.json` — not in `.aeroci.json`, because a policy a
+repository can grant for itself is not a policy. It is also a decision of its
+own: allowing it does **not** let the workflow's own steps reach the network.
+See [Network policy](./network.md).
 
 | Situation | What happens |
 |-----------|--------------|
-| `--allow-download` | downloads for this run; your `.aeroci.json` is not touched |
+| `--allow-download` | downloads for this run; nothing is written anywhere |
 | `--deny-download` | never downloads, for this run |
-| `toolchain.allowDownload` in `.aeroci.json` | used as-is; no question asked |
-| neither, on a terminal | asked **once**, and the answer is saved to `.aeroci.json` |
+| `network.allowRuntimeDownloads` in `~/.aeroci/config.json` | used as-is; no question asked |
+| neither, on a terminal | asked **once**, and the answer is saved there |
 | neither, no terminal (CI, a pipe) | nothing is downloaded |
 
 A non-interactive run gets the last row on purpose: a pipeline that never agreed
 to fetch forty megabytes should not find out from its bandwidth bill. Use
 `--allow-download` there, which is a decision about one run and leaves no trace.
 
-### When it cannot be done
-
-The step still succeeds — a run is not a gatekeeper — but it says what happened
-and which version the job is really on:
+The question names the build when AeroCI already knows it, and says what it would
+have to do when it does not:
 
 ```
-⚠ Node 18 was requested but downloading Node 18.20.8 was not permitted — Node 26.9.0 is used instead
-  allow it for one run with `--allow-download`, or record the answer in .aeroci.json
+AeroCI needs Node.js 18.x to execute this workflow.
+Node.js 18.x is not installed locally.
+Download it now?
+
+  [Y] Yes   download Node.js 18.20.8 to ~/.aeroci/runtimes/node/18.20.8
+  [N] No    the setup-node step fails — Node.js 26.9.0 is not a substitute
+
+  Enter means No. Network access is never granted by default.
 ```
 
-Each reason gets its own sentence: refused, no such version, spec not
-understood, no build for this OS, network gone, checksum mismatch, or an install
-that would not start.
+Turning `18` into `18.20.8` means reading nodejs.org's release index, which is
+itself a network request — so on a machine with an empty cache the offer is
+worded for what is actually on the table: `reach nodejs.org to resolve 18.x and
+install it`. Promising a specific file before having gone to look would be a
+claim AeroCI had not earned.
 
-The substitution is recorded as a step warning, and it is in the **markdown,
-HTML and JSON** reports — the markdown summary table says a step passed with a
-warning, so it cannot be missed by reading only the top of the file. Two
-surfaces deliberately do not carry it: **JUnit XML**, which has nowhere to put
-a note on a testcase that passed, and the `--json` run summary, which is an
-aggregate (`status`, counts, `exitCode`) and keeps no per-step detail. If your
-CI reads only one of those two, the substitution is invisible to it — read the
-console, which always shows it.
+### When it cannot be done, the step fails
+
+There is no fallback. The step is red and the rest of the job never runs:
+
+```
+✗ Node.js 18.x is required but unavailable. Network access was not authorized.
+  allow it for this run with --allow-download, or record the answer in ~/.aeroci/config.json
+```
+
+This used to be a warning followed by a silent substitution, and that was the
+bug. A workflow pinned to Node 18 executed its entire test suite on whatever the
+machine had and finished green — a passing run that verified nothing the workflow
+asked for. A red run is better than a green one that means nothing.
+
+Each reason gets its own sentence: refused, no release index cached to resolve
+it, no such version, spec not understood, no build for this OS, network gone,
+checksum mismatch, or an install that would not start.
+
+The one case that is not a fallback: if the host runtime already **is** the
+version the spec resolves to, nothing is downloaded and nothing fails.
+
+```console
+  Node.js v22.23.3 (Jod) — already installed and it is what "22" resolves to
+```
+
+The failure is in the **markdown, HTML and JSON** reports. Two surfaces
+deliberately do not carry it: **JUnit XML**, which has nowhere to put a note on
+a testcase, and the `--json` run summary, which is an aggregate (`status`,
+counts, `exitCode`) and keeps no per-step detail. Either way the step's own
+status is `failure`, so a CI reading only one of those two still sees a red
+build.
 
 `actions/setup-python`, `setup-go`, `setup-java`, `setup-dotnet` and
 `setup-ruby` still only detect the local tool. The machinery is per-runtime and

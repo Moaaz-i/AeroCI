@@ -17,6 +17,7 @@ export default defineConfig({
         text: 'Details',
         items: [
           { text: 'Sandbox & Isolation', link: '/sandbox' },
+          { text: 'Network policy', link: '/features/network' },
           { text: 'Action support', link: '/features/actions' }
         ]
       }
@@ -36,6 +37,7 @@ export default defineConfig({
         text: 'In depth',
         items: [
           { text: 'Action support', link: '/features/actions' },
+          { text: 'Network policy', link: '/features/network' },
           { text: 'Workflow analyzer', link: '/features/analyzer' },
           { text: 'Profiler', link: '/features/profiler' },
           { text: 'Security audit', link: '/features/security' },

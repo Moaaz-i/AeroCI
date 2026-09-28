@@ -126,34 +126,100 @@ and says so at the start of the run.
 
 ---
 
-## `toolchain`
+## What is not configurable here: the network
 
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `allowDownload` | boolean \| null | `null` | Whether `actions/setup-node` may install a runtime from the network. `null` means nobody has been asked yet. |
+There is no `network` key in `.aeroci.json`, and adding one does not work. AeroCI
+reports the attempt and ignores it:
+
+```
+✖ .aeroci.json cannot set network.allowWorkflowNetwork (a project cannot grant it)
+  — the network policy is a decision about this machine, not about the
+  repository, and it lives in ~/.aeroci/config.json. Those keys were ignored;
+  the recorded answer still stands.
+```
+
+The reason is not tidiness. `.aeroci.json` is content that arrives with a
+repository, and a policy a repository can grant for itself is not a policy. So
+the two decisions live in `~/.aeroci/config.json`, which only you write:
 
 ```json
 {
-  "toolchain": {
-    "allowDownload": true
+  "network": {
+    "allowRuntimeDownloads": true,
+    "allowWorkflowNetwork": false
   }
 }
 ```
 
-`null` is the default and it is not `false` on purpose — it means *undecided*.
-The first time a workflow needs a Node version this machine does not have,
-AeroCI asks, and records the answer here. After that it stops asking.
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `allowRuntimeDownloads` | boolean \| null | `null` | May AeroCI fetch a Node build from nodejs.org for a workflow that needs a version this machine lacks? |
+| `allowWorkflowNetwork` | boolean \| null | `null` | May the workflow's own `run:` steps open sockets? |
 
-`--allow-download` and `--deny-download` override this for a single run and do
-**not** write to the file. An explicit flag is a decision about this run, and
-quietly rewriting somebody's project file because they passed a flag would be a
-side effect they never asked for.
+`null` means *undecided*, which is not the same as `false`. The first run that
+needs an answer asks you, and the answer is recorded, so the question is asked
+once. A run with no terminal — a CI job, a pipe, a cron entry — cannot answer,
+so the answer is `no`. Guessing "yes" would be the network access nothing agreed
+to.
 
-The cache itself is not configured here: it lives at
-`~/.aeroci/toolcache` and is shared by every project. `AERO_TOOLCACHE` moves it,
-which is what the test suite uses to stay out of your home directory. The
-sandbox never copies it, even if you point it inside the project. See
-[Toolchains](./features/actions.md#toolchains).
+**The two are independent.** Answering yes to the first says nothing about the
+second:
+
+```console
+$ aeroci run --allow-download --deny-network
+  Workflow network: DENIED — enforced with sandbox-exec on every run: step
+  ↳ Step 1/2: actions/setup-node@v4
+     ⚡ actions/setup-node@v4
+     Node.js v18.20.8 (Hydrogen) — downloaded, checksum verified against nodejs.org
+     ✔ outputs cache-hit=false node-version=18.20.8
+  ↳ Step 2/2: version
+     $ node --version
+       │ v18.20.8
+```
+
+A workflow can legitimately need its runtime installed and have no business
+phoning home. That is an ordinary thing to want, and one key cannot express it.
+
+`--allow-download` / `--deny-download` and `--allow-network` / `--deny-network`
+answer for a single run and write nothing anywhere. An explicit flag is a
+decision about this run.
+
+See [Network policy](./features/network.md) for what the denial actually does,
+and what happens on a machine that cannot enforce it.
+
+---
+
+## The global tree
+
+Not everything AeroCI keeps is in your project. It keeps these:
+
+```
+~/.aeroci/
+├── config.json            the network policy
+├── runtimes/              installed, checksum-verified runtimes
+│   └── node/18.20.8/arm64/bin/node
+│       node/18       → 18.20.8    (symlink to the newest 18.x installed)
+│       node/18.20    → 18.20.8
+└── cache/                 safe to delete at any time
+    ├── node/index.json    the release index, refreshed every 6 hours
+    ├── downloads/         archives being fetched
+    └── actions/           what `actions/cache` keeps between runs
+```
+
+`runtimes/` and `cache/` are separate on purpose. A runtime is something you
+installed and verified against a published checksum; a cache is something you may
+throw away whenever you like. Keeping them apart is what makes
+`rm -rf ~/.aeroci/cache` a safe suggestion to somebody whose disk is full.
+
+`AERO_HOME` moves the whole tree at once, which is what the test suite uses to
+stay out of your home directory. The sandbox never copies any of it, even if you
+point `AERO_HOME` inside the project — the directory name alone proves nothing,
+so the exclusion follows the path rather than the name.
+
+A `toolcache/` left by an older version is moved into place on the first run, so
+an already-installed Node is not downloaded a second time. Nothing is deleted by
+that move: a file whose destination already exists is left alone, and the old
+directory survives if anything unexpected is in it.
 
 ---
 
@@ -170,6 +236,8 @@ purpose:
   `not simulated`. AeroCI does not pretend to have Docker.
 - **A default shell per OS** — `shell: null` means "what GitHub would use
   here", not a hard-coded `bash`.
+- **The network policy** — see above. It is the one setting a project file
+  cannot reach, on purpose.
 
 ---
 

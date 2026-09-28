@@ -19,7 +19,9 @@ const path = require('path');
 const { Logger, colors } = require('../utils/logger');
 const { Engine, STATUS, FAILED_STATUSES } = require('./engine');
 const { loadConfig } = require('./config');
-const { resolveConsent } = require('./toolchain');
+const {
+    globalRoot, resolveWorkflowConsent, guard: networkGuard, migrateLegacyTree
+} = require('./network');
 const { Profiler } = require('./profiler');
 const { Reporter } = require('./reporter');
 const { Debugger } = require('./debugger');
@@ -128,10 +130,28 @@ class Runner {
 
         for (const error of config.errors) Logger.warn(error);
 
-        // Settled before any job starts, so the "may I download a runtime?"
-        // question can never interrupt a run halfway through and land in the
-        // middle of a step's output.
-        const allowDownload = await resolveConsent(config, { explicit: options.allowDownload });
+        // The old `~/.aeroci/toolcache` layout moves into the tree that replaced
+        // it, so an existing Node install is not downloaded a second time.
+        const { moved, skipped } = migrateLegacyTree();
+        for (const to of moved) {
+            Logger.note(`${colors.gray}Moved the old tool cache to${colors.reset} ${to}`);
+        }
+        if (skipped.length) {
+            Logger.note(`${colors.gray}${globalRoot()}/toolcache still holds files — left untouched${colors.reset}`);
+        }
+
+        // Settled before any job starts, so the question can never interrupt a run
+        // halfway through and land in the middle of a step's output.
+        //
+        // Only the workflow-network question is asked here. The runtime-download
+        // question is *not*, and the reason is worth stating: asked up front it
+        // would have to name a version nobody has resolved yet, so it could only
+        // say "18" — which is a range, not a file, and makes the promise of
+        // "download Node 18.20.8 to …" a thing AeroCI has not earned yet. It is
+        // asked by the `setup-node` step instead, where the build is known.
+        const allowWorkflowNetwork = await resolveWorkflowConsent({
+            explicit: options.allowNetwork
+        });
 
         const files = resolveWorkflowFiles(target, cwd, config.workflowGlobs);
         if (files.length === 0) {
@@ -164,7 +184,11 @@ class Runner {
             strictSecrets: config.strictSecrets,
             stepTimeoutMinutes: options.stepTimeout || config.runner.timeoutMinutes || 10,
             maxOutputLines: config.runner.maxOutputLines || 200,
-            allowDownload,
+            // `null` means "not decided for this run", which lets the setup-node
+            // step ask the question itself with a concrete version in hand. A flag
+            // answers it for one run and is not written anywhere.
+            allowDownload: options.allowDownload === undefined ? null : options.allowDownload,
+            network: networkGuard(allowWorkflowNetwork),
             keepSandbox: !!options.keepSandbox
         });
 

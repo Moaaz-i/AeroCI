@@ -209,6 +209,11 @@ function sampleConfig() {
             exclude: DEFAULTS.sandbox.exclude,
             keep: DEFAULTS.sandbox.keep
         }
+        // No `network` key, and there never will be one. Whether AeroCI and your
+        // workflows may reach the network is a decision about the machine, so it
+        // is recorded in ~/.aeroci/config.json — a file a repository cannot carry
+        // and therefore cannot grant for itself. AeroCI asks once and writes it
+        // there; you never have to edit this file to be asked.
     };
 }
 

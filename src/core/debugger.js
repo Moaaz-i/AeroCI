@@ -24,7 +24,7 @@ const { Sandbox } = require('./sandbox');
 const { loadEnvFile } = require('./secrets');
 const { readGitState, buildEventPayload, buildGithubContext } = require('./event');
 const { loadConfig } = require('./config');
-const { cacheRoot } = require('./toolchain');
+const { runtimesRoot, globalRoot } = require('./network');
 const { VERSION } = require('../version');
 
 /** GitHub's own default shell per platform. */
@@ -65,7 +65,7 @@ class Debugger {
         try {
             sandbox = Sandbox.create(projectRoot, {
                 exclude: config.sandboxExcludes,
-                excludePaths: [cacheRoot()],
+                excludePaths: [globalRoot()],
                 mode: config.sandbox.mode,
                 keep: !!options.keep
             });
@@ -115,7 +115,7 @@ class Debugger {
         // with the sandbox is a cache nobody can use: this used to point at
         // <workspace>/.aeroci/tool-cache, a throwaway copy, so anything a debug
         // session put there was gone before the next run.
-        const toolCache = cacheRoot();
+        const toolCache = runtimesRoot();
         fs.mkdirSync(toolCache, { recursive: true });
 
         const env = {

@@ -3,6 +3,13 @@
  *
  * Every knob has a safe default so an absent or partial file still works, and an
  * unknown/invalid field never crashes the CLI.
+ *
+ * This file configures a *project*. It deliberately cannot configure the network
+ * policy: a `network` key written here is refused, with a message naming the file
+ * that can. `.aeroci.json` is content that arrives with a repository, and a
+ * repository is exactly the thing that must not be able to grant itself the
+ * ability to reach the network — see `network.js`. Silently ignoring the key
+ * would be its own dishonesty, so it is reported instead.
  */
 
 const fs = require('fs');
@@ -39,16 +46,27 @@ const DEFAULTS = {
         exclude: ['.git', 'node_modules', '.aeroci-artifacts', '.next', 'dist', 'build',
                   'target', 'vendor', '.venv', '__pycache__', 'coverage', '.env'],
         keep: false           // keep the sandbox after the run (debugging)
-    },
-    toolchain: {
-        // Downloading a runtime (Node and friends) is the one thing AeroCI does
-        // that reaches the network during a run, so it never happens on its own.
-        // null means the user has not been asked yet; the first time a workflow
-        // needs a version this machine does not have, AeroCI asks once and
-        // records the answer here. `--allow-download` / `--no-download` override
-        // it for a single run without touching this file.
-        allowDownload: null
     }
+};
+
+/**
+ * Keys that used to live here and now do not.
+ *
+ * These are reported rather than ignored, because somebody upgrading will have
+ * this in their file and a silent no-op looks exactly like a bug. Each entry says
+ * where the setting went, so the message is a fix and not just a complaint.
+ */
+function whereItLives() {
+    return require('./network').configPathLabel();
+}
+
+const RELOCATED = {
+    network: 'a project cannot grant network access to itself',
+    toolchain: 'now "network"',
+    allowDownload: 'now "network.allowRuntimeDownloads"',
+    'network.allowRuntimeDownloads': 'a project cannot grant it',
+    'network.allowWorkflowNetwork': 'a project cannot grant it',
+    'toolchain.allowDownload': 'now "network.allowRuntimeDownloads"'
 };
 
 function isPlainObject(v) {
@@ -83,11 +101,70 @@ class Config {
                 this.errors.push(`${CONFIG_NAME} must contain a JSON object`);
                 return this;
             }
+            // Stripped before the merge, so a project cannot widen its own reach
+            // by writing keys this loader happens to understand.
+            this._rejectRelocated(parsed);
             this.data = deepMerge(DEFAULTS, parsed);
         } catch (err) {
             this.errors.push(`${CONFIG_NAME} is not valid JSON: ${err.message}`);
         }
         return this;
+    }
+
+    /**
+     * Strip the network policy out of the project file, and say so.
+     *
+     * Reporting without stripping would be the worst of both: the user is told
+     * the key was ignored while `deepMerge` quietly hands it to the rest of the
+     * program. The keys are deleted from the parsed object *before* the merge, so
+     * the policy in `~/.aeroci/config.json` stands whatever this file claims.
+     *
+     * The message names the file that does hold the setting, because a user who
+     * just typed `"network": { "allowWorkflowNetwork": true }` deserves to be
+     * told where to put it rather than only that it did not work.
+     *
+     * @param {object} parsed the file as read from disk, modified in place
+     * @returns {string[]} the full paths that were removed
+     */
+    _rejectRelocated(parsed) {
+        // Collected before anything is deleted. Deleting the `network` container
+        // first would erase the evidence of the key inside it, and the message
+        // would name a container instead of the thing the user actually typed.
+        const found = [];
+        const drop = [];
+        for (const key of Object.keys(parsed)) {
+            if (Object.prototype.hasOwnProperty.call(RELOCATED, key)) found.push(key);
+        }
+        for (const container of ['network', 'toolchain']) {
+            const nested = parsed[container];
+            if (!isPlainObject(nested)) continue;
+            for (const key of Object.keys(nested)) {
+                const full = `${container}.${key}`;
+                if (Object.prototype.hasOwnProperty.call(RELOCATED, full)) found.push(full);
+            }
+        }
+        for (const key of found) {
+            const parts = key.split('.');
+            if (parts.length === 2) {
+                const [container, leaf] = parts;
+                if (parsed[container] && isPlainObject(parsed[container])) {
+                    delete parsed[container][leaf];
+                }
+            } else if (parts.length === 1) {
+                drop.push(parts[0]);
+            }
+        }
+        for (const container of drop) delete parsed[container];
+
+        if (!found.length) return found;
+        const where = whereItLives();
+        const detail = found.map((key) => `${key} (${RELOCATED[key]})`).join(', ');
+        this.errors.push(
+            `${CONFIG_NAME} cannot set ${detail} — the network policy is a decision about this ` +
+            `machine, not about the repository, and it lives in ${where}. ` +
+            'Those keys were ignored; the recorded answer still stands.'
+        );
+        return found;
     }
 
     get raw() { return this.data; }
@@ -106,39 +183,6 @@ class Config {
     get runner() { return this.data.runner || DEFAULTS.runner; }
 
     get sandbox() { return this.data.sandbox || DEFAULTS.sandbox; }
-
-    get toolchain() { return this.data.toolchain || DEFAULTS.toolchain; }
-
-    /**
-     * Whether a runtime may be downloaded, or null when nobody has decided yet.
-     * @returns {boolean|null}
-     */
-    get allowDownload() {
-        const value = this.toolchain.allowDownload;
-        return value === true || value === false ? value : null;
-    }
-
-    /**
-     * Record the answer to "may AeroCI download a runtime?" so the question is
-     * asked once. The rest of the file is preserved: this rewrites the whole
-     * document, so a user's own keys and comments' neighbours must survive.
-     *
-     * A file that cannot be written is not an error the run should die on — the
-     * answer is still in effect for this run.
-     *
-     * @param {boolean} allowed
-     * @returns {boolean} whether it reached disk
-     */
-    saveAllowDownload(allowed) {
-        this.data.toolchain = { ...this.toolchain, allowDownload: !!allowed };
-        try {
-            fs.writeFileSync(this.path, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8');
-            return true;
-        } catch (err) {
-            this.errors.push(`could not save ${CONFIG_NAME}: ${err.message}`);
-            return false;
-        }
-    }
 
     get vars() { return isPlainObject(this.data.vars) ? this.data.vars : {}; }
 

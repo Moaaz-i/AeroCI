@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { which } = require('./shell');
 const { ensureNode } = require('./toolchain');
+const { requestLabel, configPathLabel } = require('./network');
 
 /** @typedef {{success:boolean, outputs?:object, notSimulated?:boolean, messages?:string[]}} SimResult */
 
@@ -38,9 +39,11 @@ class ActionSimulators {
         this.cacheDir = cacheDir;
         this.eventPath = eventPath;
         this.repo = repo;
-        // { allowDownload: boolean|null } — whether installing a runtime may
-        // reach the network. null means the question is still open and the
-        // toolchain must not download.
+        // { allowDownload: boolean|null, decide?: Function } — whether installing
+        // a runtime may reach the network. `null` means the question is still
+        // open, and `decide` is what asks it; the question is asked here, where
+        // the concrete version is known, rather than once at the top of the run
+        // where it could only be asked vaguely.
         this.toolchain = toolchain;
     }
 
@@ -112,24 +115,42 @@ class ActionSimulators {
     }
 
     /**
-     * Say why the host runtime is being used instead of the requested one.
+     * Say that the requested runtime is not available, and why in one sentence.
      *
-     * The substitution is the whole story, so it is stated in one line with both
-     * versions named, and the fix is a separate line so it does not dilute the
-     * warning in the report.
+     * This used to be a warning followed by a silent substitution, and that was
+     * the bug: a workflow pinned to Node 18 ran its whole test suite on whatever
+     * the machine had and finished green. A green run that verified nothing is
+     * worse than a red one, so the step fails and names the reason.
+     *
+     * The label is the request as the workflow wrote it — `18` is shown as
+     * `18.x`, because "Node.js 18 is not installed" is not a true sentence and
+     * reads as a claim about a runtime rather than about a range.
+     *
+     * @returns {{message: string, hint: string|null}}
      */
-    _nodeFallback(spec, reason, detail, host) {
+    _nodeUnavailable(spec, reason, detail) {
+        const label = requestLabel(spec, detail && detail.version);
+        const where = configPathLabel();
+        const causes = {
+            denied: 'Network access was not authorized.',
+            'no-index': 'Network access was not authorized, and no release index is cached to resolve it without.',
+            offline: "Node's release index could not be reached, and none is cached.",
+            'not-found': 'No published Node release matches it.',
+            'unsupported-spec': 'That is not a version spec this simulator understands.',
+            'unsupported-platform': `nodejs.org publishes no build for ${process.platform}-${process.arch}.`,
+            'download-failed': 'The download or its checksum verification did not complete.',
+            unusable: 'It installed but did not start.',
+            'no-spec': 'No version was requested.'
+        };
         const hints = {
-            denied: 'allow it for one run with `--allow-download`, or record the answer in .aeroci.json',
-            offline: 'Node\'s release index could not be reached; a later run with a network will install it',
-            'not-found': 'check the version against https://nodejs.org/dist/index.json',
+            denied: `allow it for this run with --allow-download, or record the answer in ${where}`,
+            'no-index': `run once with --allow-download to fetch the index, or allow it in ${where}`,
+            offline: 'run again with a network, or allow the download in ' + where,
             'unsupported-spec': 'use a form setup-node understands, e.g. 18, 18.x, 18.20.4, lts/*, >=18 <21',
-            'unsupported-platform': 'no official build exists for this operating system and architecture',
-            'download-failed': 'the download or its checksum verification did not complete',
-            unusable: 'the downloaded build did not start, so it was not used'
+            'unsupported-platform': 'pin a version with a build for this platform, or use a container image'
         };
         return {
-            message: `⚠ Node ${spec} was requested but ${detail} — Node ${host} is used instead`,
+            message: `✗ Node.js ${label} is required but unavailable. ${causes[reason] || detail || 'It could not be installed.'}`,
             hint: hints[reason] || null
         };
     }
@@ -143,6 +164,11 @@ class ActionSimulators {
      * already have it, and prepend its `bin` to the job's PATH. A previous
      * version of this step only compared numbers and then carried on with
      * whatever Node the host had, so a job pinned to 18 could finish green on 26.
+     *
+     * When the runtime cannot be provided the step **fails**. There is no
+     * fallback path, and that is the point: the job's remaining steps are about to
+     * run on an interpreter the workflow did not ask for, and reporting that as
+     * success is the one outcome a CI tool must never produce.
      */
     async setupNode(step, ctx) {
         const messages = [];
@@ -157,6 +183,7 @@ class ActionSimulators {
             const consent = this.toolchain || {};
             const result = await ensureNode(requested, {
                 allowDownload: consent.allowDownload === undefined ? null : consent.allowDownload,
+                decide: consent.decide,
                 onProgress: (percent) => this._onNodeDownloadProgress?.(percent)
             });
 
@@ -170,7 +197,7 @@ class ActionSimulators {
                 if (result.source === 'host') {
                     messages.push(`Node.js v${version}${codename} — already installed and it is what "${result.spec}" resolves to`);
                 } else if (result.source === 'cache') {
-                    messages.push(`Node.js v${version}${codename} — from the tool cache at ${result.bin}`);
+                    messages.push(`Node.js v${version}${codename} — from the runtime store at ${result.bin}`);
                 } else {
                     messages.push(`Node.js v${version}${codename} — downloaded, checksum verified against nodejs.org`);
                 }
@@ -178,10 +205,10 @@ class ActionSimulators {
                     messages.push('⚠ the Node release index used was a cached copy — the network was not reached for it');
                 }
             } else {
-                const { message, hint } = this._nodeFallback(result.spec, result.reason, result.message, host);
+                const { message, hint } = this._nodeUnavailable(requested, result.reason, result.message);
                 messages.push(message);
                 if (hint) messages.push(`  ${hint}`);
-                version = host;
+                return { success: false, outputs: {}, messages };
             }
         } else {
             messages.push(`Node.js v${host} — no node-version was requested`);
