@@ -45,7 +45,7 @@ aeroci run
 A real run, copied as printed (the sandbox path is shortened):
 
 ```
- aeroci v2.1.0
+ aeroci v2.2.0
   Workflow                  : CI
   Event                     : push
   Repository                : acme/widgets @ ae063dc9143a
