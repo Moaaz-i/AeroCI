@@ -201,7 +201,7 @@ Not everything AeroCI keeps is in your project. It keeps these:
 │       node/18       → 18.20.8    (symlink to the newest 18.x installed)
 │       node/18.20    → 18.20.8
 └── cache/                 safe to delete at any time
-    ├── node/index.json    the release index, refreshed every 6 hours
+    ├── node/index.json    the release index, refreshed when the network is allowed and the copy is older than 6 hours
     ├── downloads/         archives being fetched
     └── actions/           what `actions/cache` keeps between runs
 ```

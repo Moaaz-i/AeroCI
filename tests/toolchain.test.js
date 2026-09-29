@@ -22,7 +22,7 @@ const { suite, test, asyncTest, assert } = require('./harness');
 const {
     ensureNode, resolveFromIndex, parseRange, satisfies,
     parseVersion, compareVersions, normaliseSpec, currentPlatform,
-    runtimesRoot, globalRoot, cacheRoot
+    runtimesRoot, globalRoot, cacheRoot, readCachedIndex
 } = require('../src/core/toolchain');
 const { Sandbox } = require('../src/core/sandbox');
 
@@ -267,6 +267,29 @@ suite('toolchain · refusing honestly', () => {
 
     const reasonsFor = (spec) => withHome(INDEX, () => ensureNode(spec, { allowDownload: false }));
 
+    /** Seed the cache with a custom index instead of the checked-in slice. */
+    const withIndex = (raw, fn) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aeroci-tc-'));
+        const home = path.join(dir, 'home');
+        fs.mkdirSync(path.join(home, 'cache', 'node'), { recursive: true });
+        fs.writeFileSync(path.join(home, 'cache', 'node', 'index.json'), JSON.stringify(raw), 'utf8');
+        const saved = process.env.AERO_HOME;
+        process.env.AERO_HOME = home;
+        try {
+            return fn();
+        } finally {
+            if (saved === undefined) delete process.env.AERO_HOME;
+            else process.env.AERO_HOME = saved;
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    };
+
+    /** An index whose only entry is the Node this suite is running under. */
+    const hostIndex = () => [{
+        version: `v${process.versions.node}`, date: '2026-01-01', lts: false,
+        files: ['osx-arm64-tar', 'linux-x64']
+    }];
+
     asyncTest('a spec with no version behind it is "not found", not a crash', async () => {
         const result = await reasonsFor('99');
         assert.strictEqual(result.ok, false);
@@ -307,6 +330,41 @@ suite('toolchain · refusing honestly', () => {
         const result = await reasonsFor('18');
         assert.strictEqual(result.reason, 'denied');
         assert.ok(result.message.includes('18.20.8'), 'resolved offline against the cache');
+    });
+
+    asyncTest('a fresh cached index is not flagged as stale', async () => {
+        // The caller prints "cached copy, the network was not reached" only for a
+        // copy past its six hours. A file written seconds ago is not a compromise;
+        // flagging it would make the warning a lie.
+        const result = await withIndex(hostIndex(), () => ensureNode(process.versions.node, { allowDownload: false }));
+        assert.strictEqual(result.ok, true, JSON.stringify(result));
+        assert.strictEqual(result.source, 'host');
+        assert.strictEqual(result.staleIndex, false);
+    });
+
+    asyncTest('a stale cached index is flagged as stale when refreshing is not permitted', async () => {
+        // Once the copy is older than six hours and the network is off, the stale
+        // flag says loudly that the answer came from yesterday's list.
+        const result = await withIndex(hostIndex(), () => {
+            const file = path.join(process.env.AERO_HOME, 'cache', 'node', 'index.json');
+            const old = new Date('2020-01-01');
+            fs.utimesSync(file, old, old);
+            return ensureNode(process.versions.node, { allowDownload: false });
+        });
+        assert.strictEqual(result.ok, true, JSON.stringify(result));
+        assert.strictEqual(result.source, 'host');
+        assert.strictEqual(result.staleIndex, true);
+    });
+
+    asyncTest('readCachedIndex tells a six-hour boundary apart from a fresh write', async () => {
+        const fresh = await withIndex(hostIndex(), () => readCachedIndex());
+        assert.strictEqual(fresh.stale, false);
+        const aged = await withIndex(hostIndex(), () => {
+            const file = path.join(process.env.AERO_HOME, 'cache', 'node', 'index.json');
+            fs.utimesSync(file, new Date('2020-01-01'), new Date('2020-01-01'));
+            return readCachedIndex();
+        });
+        assert.strictEqual(aged.stale, true);
     });
 
     asyncTest('with no cached index and no permission, it says so instead of reaching out', async () => {

@@ -726,13 +726,30 @@ async function ensureNode(spec, { allowDownload = null, onProgress, decide } = {
     // read even when the host happens to match: without it there is no way to know
     // what the spec resolves to, and a silent substitution is what this module
     // exists to stop. A cached copy answers without reaching out at all, which is
-    // why a run that has done this before needs no permission to resolve a version.
+    // why a run that has done this before needs no permission to resolve a version —
+    // provided the copy is still current. Past its six hours it is a piece of the
+    // past: a machine permitted to reach nodejs.org refreshes it, while a machine
+    // that must not is told the answer came from yesterday's list. Flagging every
+    // cached copy as stale would print that warning for a five-minute-old file.
     const cached = readCachedIndex();
     let index;
     let staleIndex = false;
-    if (cached) {
+    if (cached && !cached.stale) {
         index = cached.index;
-        staleIndex = true;
+    } else if (cached) {
+        if ((await permitted('')) === true) {
+            try {
+                ({ index, staleIndex } = await fetchIndex());
+            } catch (err) {
+                // Offline in the middle of refreshing: yesterday's list still beats
+                // no list at all, and the stale flag says loudly what happened.
+                index = cached.index;
+                staleIndex = true;
+            }
+        } else {
+            index = cached.index;
+            staleIndex = true;
+        }
     } else {
         if (!(await permitted(''))) return noIndex();
         try {
@@ -823,5 +840,8 @@ module.exports = {
     parseVersion,
     compareVersions,
     normaliseSpec,
-    PLATFORMS
+    PLATFORMS,
+    // Exported for tests: the freshness test writes a cache file and reads it
+    // back, which is the only way to prove the six-hour flag without a network.
+    readCachedIndex
 };

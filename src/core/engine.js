@@ -349,15 +349,47 @@ class Engine {
                 ? ` ${colors.gray}(${combinations.length} combination${combinations.length === 1 ? '' : 's'}, max-parallel ${maxParallel === Infinity ? '∞' : maxParallel})${colors.reset}`
                 : '';
 
-            Logger.job(`[${jobId}]${job.name && job.name !== jobId ? ` ${colors.gray}(${expressions.evaluateTemplate(String(job.name), baseCtx)})${colors.reset}` : ''} ${colors.gray}· ${job['runs-on'] || 'ubuntu-latest'} · ${(job.steps || []).length} step(s)${parallelNote}`);
+            const runsOn = job['runs-on'] || 'ubuntu-latest';
+            const stepCount = (job.steps || []).length;
+
+            // A runner renders a matrix job's `name:` once per combination — each
+            // copy is its own job entry whose title interpolates that copy's
+            // matrix. One evaluation against an empty matrix produced
+            // `(Test (Node ))` where a runner shows `(Test (Node 18))`.
+            const nameFor = (matrix, index) => {
+                if (!job.name || job.name === jobId) return null;
+                const ctx = {
+                    ...baseCtx,
+                    contexts: {
+                        ...baseCtx.contexts,
+                        matrix,
+                        strategy: {
+                            'fail-fast': failFast,
+                            'job-index': index,
+                            'job-total': combinations.length,
+                            'max-parallel': maxParallel === Infinity ? 1 : maxParallel
+                        }
+                    }
+                };
+                try {
+                    return expressions.evaluateTemplate(String(job.name), ctx);
+                } catch (_) {
+                    // A broken display name must not kill the job that carries it.
+                    return String(job.name);
+                }
+            };
+            const comboNames = combinations.map((m, i) => nameFor(m, i));
+            const namesRepeat = comboNames.length > 1 && comboNames.every((n) => n === comboNames[0]);
 
             const instanceResults = [];
             let jobFailed = false;
 
             for (const [index, matrix] of combinations.entries()) {
-                if (combinations.length > 1) {
-                    Logger.note(`matrix ${index + 1}/${combinations.length} ${colors.gray}${JSON.stringify(matrix)}${colors.reset}`);
-                }
+                const name = comboNames[index];
+                const matrixTag = combinations.length > 1 && namesRepeat
+                    ? ` ${colors.gray}· matrix ${index + 1}/${combinations.length}${colors.reset}`
+                    : '';
+                Logger.job(`[${jobId}]${name ? ` ${colors.gray}(${name})${colors.reset}` : ''} ${colors.gray}· ${runsOn} · ${stepCount} step(s)${index === 0 ? parallelNote : ''}${matrixTag}`);
 
                 // A fresh checkout per instance. This is what makes a matrix
                 // combination independent: they run on separate machines, so a

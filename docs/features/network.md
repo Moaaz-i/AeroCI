@@ -262,6 +262,16 @@ itself a network request. So the index is cached in
     and no release index is cached to resolve it without.
   ```
 
+A cached index is not frozen in time. When the copy is older than six hours and
+the network is already permitted for this download, it is refreshed before the
+spec is resolved — the same list a real runner would look at. When the copy is
+stale and the network is not permitted, the stale copy is used and AeroCI says
+so in the step log:
+
+```
+⚠ the Node release index used was a cached copy — the network was not reached for it
+```
+
 The first run of all, with an empty cache, has to ask before it can promise a
 specific file. So the offer is worded for what is actually on the table:
 

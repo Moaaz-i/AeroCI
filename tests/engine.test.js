@@ -12,7 +12,7 @@ const os = require('os');
 const path = require('path');
 const { suite, test, asyncTest, assert } = require('./harness');
 const { Engine, STATUS, FAILED_STATUSES, CONTEXTS_BY_SCOPE } = require('../src/core/engine');
-const { Logger } = require('../src/utils/logger');
+const { Logger, colors } = require('../src/utils/logger');
 
 // The engine narrates every run. Here that is pure noise: the assertions are on
 // the returned record, and the progress output buries which test is talking.
@@ -794,5 +794,44 @@ jobs:
 `;
         const r = await run(NAMELESS);
         assert.ok(logOf(stepNamed(r, 'j', 'Read')).includes('workflow=ci.yml'));
+    });
+});
+
+suite('engine · a matrix job name renders per combination', () => {
+    asyncTest('the header evaluates ${{ matrix.* }} with each combination\'s values', async () => {
+        // GitHub titles each matrix copy with its own values — `Test (Node 18)`
+        // rather than `Test (Node )`. The engine must evaluate `name:` per
+        // combination, against that combination's matrix, not once against an
+        // empty one (which left a blank slot in the header AeroCI prints).
+        Logger.setQuiet(false);
+        const lines = [];
+        const realEmit = Logger.emit;
+        Logger.emit = (t) => { lines.push(colors.strip(t)); };
+        let status;
+        try {
+            const r = await run(`
+name: Matrix headers
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Test (Node \${{ matrix.node-version }})
+    strategy:
+      matrix:
+        node-version: [18, 20]
+    steps:
+      - run: echo done
+`);
+            status = r.status;
+        } finally {
+            Logger.emit = realEmit;
+            Logger.setQuiet(true);
+        }
+        assert.strictEqual(status, STATUS.SUCCESS);
+        const headers = lines.filter((l) => l.includes('[test]'));
+        assert.ok(headers.length >= 2, `expected a header per combination, got ${headers.length}: ${headers.join(' | ')}`);
+        assert.ok(headers.some((h) => h.includes('Test (Node 18)')), headers.join(' | '));
+        assert.ok(headers.some((h) => h.includes('Test (Node 20)')), headers.join(' | '));
+        assert.ok(headers.every((h) => !/\(Node \)/.test(h)), headers.join(' | '));
     });
 });
