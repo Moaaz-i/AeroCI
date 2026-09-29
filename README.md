@@ -66,6 +66,35 @@ dependencies. A step that writes into them edits the real files.
 
 ---
 
+## Network
+
+> **AeroCI never uses the network without explicit permission.**
+
+Two separate decisions are recorded in `~/.aeroci/config.json` — not in
+`.aeroci.json`, because that file arrives with the repository, and a policy a
+repository can grant for itself is not a policy:
+
+| Consent | Governs | Default |
+|---------|---------|---------|
+| `network.allowRuntimeDownloads` | AeroCI fetching a Node build from nodejs.org for a workflow that needs a version this machine lacks | undecided — asked once, on a terminal |
+| `network.allowWorkflowNetwork` | the workflow's own `run:` steps opening sockets | **denied** |
+
+Answering one is not an answer to the other. Allowing the runtime download
+does not open the workflow's network, and the denial is enforced rather than
+promised: every step runs inside `sandbox-exec` on macOS or `unshare --net` on
+Linux, so a `curl` gets no response while a `localhost` server still answers.
+Where no mechanism exists, the run says **NOT ENFORCED** in those words before
+any step executes.
+
+A `setup-node` step that needs a runtime it may not download **fails** instead
+of silently substituting a different Node — a green run that verified nothing
+the workflow asked for is worse than a red one. For one-run decisions:
+`--allow-network` / `--deny-network` and `--allow-download` /
+`--deny-download`. Details and the measured behaviour live in
+[docs/features/network.md](docs/features/network.md).
+
+---
+
 ## What is not simulated
 
 The honest list, so a green run is never read as more than it is:
